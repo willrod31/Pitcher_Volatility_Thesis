@@ -1,6 +1,8 @@
 # Valuing Pitcher Volatility: Identifying Asymmetric Upside for Low-Payroll Front Offices
 
-Status: in progress. Data pipeline and Module 1 built. Modules 2-3 and dashboard scaffolded, not populated with real results yet.
+## Thesis
+
+Can elite raw pitch characteristics (Stuff+) that are being suppressed by fixable command or pitch-usage issues be systematically identified using public Statcast data, allowing small-market teams to acquire mispriced pitching talent at a discount?
 
 ## Problem
 
