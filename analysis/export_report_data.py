@@ -1,11 +1,13 @@
 """
-Hand-off point between analysis and dashboard.
+Hand-off point between the full analysis pipeline and the dashboard.
 
 Joins stuff_plus_proxy.py, asymmetric_upside.py, volatility_discount.py, and
 risk_adjusted_value.py output into one flat CSV with a fixed column
-contract. dashboard/app.py reads this file (or
-dashboard/generate_sample_data.py's placeholder version) and never needs to
-change when real data replaces it, as long as this contract stays the same.
+contract, for the eventual multi-pitcher League Mispricing Board.
+
+Not wired into dashboard/app.py yet -- the other three modules haven't been
+run on real data (see README "Known limitations"), so app.py currently
+reads stuff_plus_proxy.py's own dashboard exports directly instead.
 
 Column contract:
     Pitcher, Team, StuffPlus, CommandProxy, VolatilityPercentile,
@@ -17,7 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.risk_adjusted_value import OUT_PATH as RISK_ADJUSTED_PATH
+from analysis.risk_adjusted_value import OUT_PATH as RISK_ADJUSTED_PATH
 
 OUT_PATH = Path(__file__).resolve().parent.parent / "dashboard" / "data" / "pitcher_report_data.csv"
 

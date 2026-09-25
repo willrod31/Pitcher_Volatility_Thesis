@@ -27,9 +27,9 @@ from config import (
     VOLATILITY_SHRINKAGE,
     WAR_PER_TALENT_Z,
 )
-from src.asymmetric_upside import OUT_PATH as UPSIDE_PATH
-from src.volatility_discount import OUT_PATH as VOLATILITY_PATH
-from src.utils import CACHE_DIR, zscore
+from analysis.asymmetric_upside import OUT_PATH as UPSIDE_PATH
+from analysis.volatility_discount import OUT_PATH as VOLATILITY_PATH
+from analysis.utils import CACHE_DIR, zscore
 
 OUT_PATH = CACHE_DIR / "risk_adjusted_value.parquet"
 SALARIES_PATH = CACHE_DIR / "salaries.csv"
