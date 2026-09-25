@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
 
-from src.data_acquisition import filter_qualified, load_season
-from src.utils import CACHE_DIR, percentile_rank, zscore
+from analysis.data_acquisition import filter_qualified, load_season
+from analysis.utils import CACHE_DIR, percentile_rank, zscore
 
 OUT_PATH = CACHE_DIR / "volatility_discount.parquet"
 

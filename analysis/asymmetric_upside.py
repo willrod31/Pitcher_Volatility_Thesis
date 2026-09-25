@@ -19,9 +19,9 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from src.data_acquisition import filter_qualified, load_season
-from src.stuff_plus_proxy import SUMMARY_PATH, pitcher_level_stuff_plus
-from src.utils import CACHE_DIR, zscore
+from analysis.data_acquisition import filter_qualified, load_season
+from analysis.stuff_plus_proxy import SUMMARY_PATH, pitcher_level_stuff_plus
+from analysis.utils import CACHE_DIR, zscore
 
 OUT_PATH = CACHE_DIR / "asymmetric_upside.parquet"
 
