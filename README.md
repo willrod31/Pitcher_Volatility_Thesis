@@ -30,6 +30,7 @@ pitcher-volatility-thesis/
 │   ├── stuff_plus_proxy.py      # Stuff+ proxy model
 │   ├── asymmetric_upside.py     # stuff vs. command mispricing index (incl. Command Proxy)
 │   ├── volatility_discount.py   # release point / velo variance modeling
+│   ├── injury_history.py        # IL stints from the MLB Stats API transactions feed
 │   ├── risk_adjusted_value.py   # risk-adjusted WAR proxy + $ surplus value ranking
 │   ├── export_report_data.py    # joins all analysis output into one CSV for the dashboard
 │   └── utils.py
@@ -47,6 +48,11 @@ stuff_plus_proxy.py — Stuff+ Proxy. Trains a whiff-probability model per pitch
 asymmetric_upside.py — Asymmetric Upside Index. Flags pitchers with elite Stuff+ Proxy but poor surface results explained by command, not shape. Also computes the Command Proxy itself (edge%, meatball%, walk rate, since Location+ is proprietary). Index = z(Stuff+ Proxy) - z(Command Proxy). Also flags pitch-mix inefficiency: best-performing pitch type vs. most-used pitch type.
 
 volatility_discount.py — Volatility Discount Metric. Computes per-start variance in release point and velocity. Regresses future performance (next-start results) on current volatility to test whether volatility actually predicts decline, versus how much the market appears to penalize it.
+
+injury_history.py — IL history. Pulls each pitcher's transactions from the MLB Stats API and builds one row per IL stint (data/injury_stints.csv) and one per pitcher (data/injury_summary.csv). volatility_discount.py joins the summary and also tests whether volatility predicts an IL stint in the next 30 days.
+
+    python -m analysis.injury_history --pitcher "Paul Skenes"
+    python -m analysis.injury_history --team PIT
 
 risk_adjusted_value.py — Risk-Adjusted Value Projection. Combines the upside index and volatility metric into a projected WAR proxy, shrunk toward replacement level as volatility increases. Ranks pitchers by surplus value (risk-adjusted projected value minus contract cost).
 
@@ -105,7 +111,7 @@ risk of that for stuff_plus_proxy.py).
 
 - A full league-wide season pull in one `load_season()` call can OOM on a memory-limited machine during pybaseball's concat step -- confirmed on an 8GB box around the 6-month mark. `load_season_monthly()` works around this (see above) and is used by stuff_plus_proxy.py's --pitcher/--team training step; the plain no-flag full-league-wide path in stuff_plus_proxy.py and the other three analysis modules don't use it yet.
 - Stuff+ Proxy is a gradient-boosted classifier on shape features, not a full replacement for proprietary gradient-boosted Stuff+ models.
-- IL/injury history is not available via pybaseball — requires manual collection (Roster Resource/Spotrac) for any pitcher used in volatility_discount.py's predictive test.
+- IL history comes from the MLB Stats API transactions feed (analysis/injury_history.py), not manual collection anymore. The feed occasionally leaves out an activation, so when one's missing the return date is taken from the pitcher's first MLB appearance after the placement. Only pitchers you've run it for (--team/--pitcher) have injury data.
 - Contract cost data is not scriptable via pybaseball — requires manual collection (data/salaries.csv) for risk_adjusted_value.py.
 - simple_projected_war in risk_adjusted_value.py is an uncalibrated placeholder until regressed against actual historical WAR for a training sample.
 - Command Proxy (in asymmetric_upside.py) is a zone-discipline stand-in (edge%/meatball%/BB%), not a real command measurement — there's no intended-target data in the public Statcast feed.

@@ -44,16 +44,21 @@ def fetch_statcast_pitcher(pitcher_name: str, start_date: str = START_DATE, end_
     if raw_path.exists() and not force_refresh:
         return pd.read_parquet(raw_path)
 
-    first, last = pitcher_name.strip().split(" ", 1)
-    lookup = pb.playerid_lookup(last, first)
-    if lookup.empty:
-        raise ValueError(f"No player found for name '{pitcher_name}'")
-    mlbam_id = int(lookup.sort_values("mlb_played_last", ascending=False)["key_mlbam"].iloc[0])
+    mlbam_id = lookup_mlbam_id(pitcher_name)
 
     pb.cache.enable()
     df = pb.statcast_pitcher(start_date, end_date, mlbam_id)
     df.to_parquet(raw_path, index=False)
     return df
+
+
+def lookup_mlbam_id(pitcher_name: str) -> int:
+    """Resolve a "First Last" name to an MLBAM id (most recently active match wins)."""
+    first, last = pitcher_name.strip().split(" ", 1)
+    lookup = pb.playerid_lookup(last, first)
+    if lookup.empty:
+        raise ValueError(f"No player found for name '{pitcher_name}'")
+    return int(lookup.sort_values("mlb_played_last", ascending=False)["key_mlbam"].iloc[0])
 
 
 def load_pitcher_season(pitcher_name: str, start_date: str = START_DATE, end_date: str = END_DATE, force_refresh: bool = False) -> pd.DataFrame:
@@ -107,11 +112,18 @@ def load_team_season(team: str, start_date: str = START_DATE, end_date: str = EN
     return df
 
 
+def team_roster_ids(team: str, start_date: str = START_DATE, end_date: str = END_DATE, force_refresh: bool = False) -> pd.DataFrame:
+    """PitcherId + Pitcher for everyone who threw for `team` at any point in this range."""
+    raw = fetch_statcast_team(team, start_date, end_date, force_refresh=force_refresh)
+    named = attach_pitcher_names(raw[["pitcher"]].drop_duplicates())
+    named = named.dropna(subset=["Pitcher"]).rename(columns={"pitcher": "PitcherId"})
+    named["PitcherId"] = named["PitcherId"].astype(int)
+    return named.sort_values("Pitcher").reset_index(drop=True)
+
+
 def team_roster(team: str, start_date: str = START_DATE, end_date: str = END_DATE, force_refresh: bool = False) -> list[str]:
     """Names of every pitcher who threw for `team` at any point in this range."""
-    raw = fetch_statcast_team(team, start_date, end_date, force_refresh=force_refresh)
-    named = attach_pitcher_names(raw)
-    return sorted(named["Pitcher"].dropna().unique().tolist())
+    return team_roster_ids(team, start_date, end_date, force_refresh=force_refresh)["Pitcher"].tolist()
 
 
 def load_team_roster_full_seasons(team: str, start_date: str = START_DATE, end_date: str = END_DATE, force_refresh: bool = False) -> pd.DataFrame:

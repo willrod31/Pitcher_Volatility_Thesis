@@ -9,3 +9,5 @@ REPLACEMENT_LEVEL_WAR = 0.0    # WAR a freely-available replacement pitcher prov
 LEAGUE_AVG_STARTER_WAR = 2.0   # rough anchor for a qualified, average starter
 WAR_PER_TALENT_Z = 1.5         # placeholder scaling: WAR swing per SD of talent -- see Module 3 docstring
 VOLATILITY_SHRINKAGE = 0.6     # max fraction of upside pulled back toward replacement at 100th volatility pctile
+# Injury history (analysis/injury_history.py): IL stints pulled for SEASON - N through SEASON
+INJURY_LOOKBACK_SEASONS = 3
