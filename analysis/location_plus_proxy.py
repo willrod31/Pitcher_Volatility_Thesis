@@ -28,6 +28,12 @@ league-wide qualified pool (config.MIN_PITCHES_FOR_INCLUSION pitches; per
 pitch type, config.MIN_PITCHES_PER_TYPE_FOR_SCALE and z within that pitch
 type). 100 = league average, 10 points = 1 SD, higher = better.
 
+LocationPlus_Reg regresses small samples toward 100 with the stabilization
+point k from analysis/stabilization.py: (n * LocationPlus + k * 100) / (n + k),
+LocationPlus_Reliability = n / (n + k). Blank under config.MIN_PITCHES_TO_DISPLAY
+pitches (per pitch type: config.MIN_PITCHES_PER_TYPE_TO_DISPLAY). The mean/SD
+behind LocationPlus itself still come from the qualified pool only.
+
 Location+ still can't see the catcher's target: it grades location quality
 given the count, not whether the pitcher hit his spot.
 """
@@ -41,8 +47,11 @@ from sklearn.linear_model import LinearRegression
 from sklearn.metrics import r2_score
 from sklearn.model_selection import GroupKFold
 
-from config import END_DATE, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_FOR_SCALE, START_DATE
+from config import (
+    END_DATE, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_FOR_SCALE, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, START_DATE,
+)
 from analysis.data_acquisition import filter_to_team, load_season_monthly, lookup_mlbam_id, primary_team
+from analysis.stabilization import load_k, regress, reliability
 from analysis.utils import CACHE_DIR, scale_100
 
 PITCHES_PATH = CACHE_DIR / "location_plus_pitches.parquet"
@@ -184,16 +193,32 @@ def summarize_location_plus(scored: pd.DataFrame) -> tuple[pd.DataFrame, pd.Data
         pool = -rows.loc[rows["Qualified"], "MeanPredRunValue"]
         if len(pool) >= 2:
             by_type.loc[rows.index, "LocationPlus"] = scale_100(-rows["MeanPredRunValue"], pool).round(1)
+    return add_regressed(by_type, pitcher)
+
+
+def add_regressed(by_type: pd.DataFrame, pitcher: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """LocationPlus_Reg / LocationPlus_Reliability (raw LocationPlus kept as is)."""
+    k = load_k("LocationPlus")
+    pitcher["LocationPlus_Reliability"] = reliability(pitcher["Pitches"], k).round(3)
+    pitcher["LocationPlus_Reg"] = regress(pitcher["LocationPlus"], pitcher["Pitches"], k, 100).round(1)
+    pitcher.loc[pitcher["Pitches"] < MIN_PITCHES_TO_DISPLAY, "LocationPlus_Reg"] = np.nan
+
+    k = by_type["PitchType"].map(lambda p: load_k(f"LocationPlus[{p}]", fallback="LocationPlus"))
+    by_type["LocationPlus_Reliability"] = reliability(by_type["Pitches"], k).round(3)
+    by_type["LocationPlus_Reg"] = regress(by_type["LocationPlus"], by_type["Pitches"], k, 100).round(1)
+    total = by_type["PitcherId"].map(pitcher.set_index("PitcherId")["Pitches"])
+    hidden = (by_type["Pitches"] < MIN_PITCHES_PER_TYPE_TO_DISPLAY) | (total < MIN_PITCHES_TO_DISPLAY)
+    by_type.loc[hidden, "LocationPlus_Reg"] = np.nan
     return by_type, pitcher
 
 
 def save_for_dashboard(by_type: pd.DataFrame, pitcher: pd.DataFrame):
     """League-wide per-pitch-type Location+ plus each pitcher's overall number, keyed on PitcherId."""
+    overall = ["Pitches", "LocationPlus", "LocationPlus_Reg", "LocationPlus_Reliability", "Qualified"]
     rows = by_type.merge(
-        pitcher[["PitcherId", "LocationPlus", "Qualified"]].rename(
-            columns={"LocationPlus": "OverallLocationPlus", "Qualified": "OverallQualified"}),
-        on="PitcherId",
-    )[["PitcherId", "Pitcher", "PitchType", "Pitches", "LocationPlus", "Qualified", "OverallLocationPlus", "OverallQualified"]]
+        pitcher[["PitcherId", *overall]].rename(columns={c: f"Overall{c}" for c in overall}), on="PitcherId",
+    )[["PitcherId", "Pitcher", "PitchType", "Pitches", "LocationPlus", "LocationPlus_Reg", "LocationPlus_Reliability",
+       "Qualified", *[f"Overall{c}" for c in overall]]]
     DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
     rows.to_csv(DASHBOARD_PATH, index=False)
     print(f"Saved {len(rows)} row(s) to {DASHBOARD_PATH}")
@@ -276,12 +301,12 @@ def reliability_test(scored: pd.DataFrame) -> pd.DataFrame:
     even = command_metrics(pitches[pitches["PitchOrder"] % 2 == 0], pitches[pitches["PAOrder"] % 2 == 0])
     full = command_metrics(pitches, pitches)
 
-    from analysis.asymmetric_upside import LEAGUE_STUFF_PATH, pitcher_stuff_plus
+    from analysis.stuff_plus_proxy import LEAGUE_PITCHER_PATH
     stuff = None
-    if LEAGUE_STUFF_PATH.exists():
-        stuff = pitcher_stuff_plus(pd.read_parquet(LEAGUE_STUFF_PATH)).set_index("PitcherId")["StuffPlus"]
+    if LEAGUE_PITCHER_PATH.exists():
+        stuff = pd.read_parquet(LEAGUE_PITCHER_PATH).set_index("PitcherId")["StuffPlus"]
     else:
-        print(f"No {LEAGUE_STUFF_PATH.name} yet -- run python -m analysis.asymmetric_upside for the Stuff+ correlations")
+        print(f"No {LEAGUE_PITCHER_PATH.name} yet -- run python -m analysis.stuff_plus_proxy for the Stuff+ correlations")
 
     rows = []
     for metric in RELIABILITY_METRICS:

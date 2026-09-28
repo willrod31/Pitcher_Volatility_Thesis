@@ -33,3 +33,9 @@ MAX_CONTROL_YEARS = 6            # cap so one pitcher's long tail does not domin
 # Dashboard movement chart: arm angle fallback (APPROXIMATION) when Statcast has no arm_angle --
 # degrees(atan2(release_pos_z - SHOULDER_HEIGHT_FT, |release_pos_x|))
 SHOULDER_HEIGHT_FT = 5.0
+
+# Small samples (analysis/stabilization.py): below MIN_PITCHES_FOR_INCLUSION a pitcher is still shown,
+# but every metric is regressed toward the qualified league mean: (n * obs + k * mean) / (n + k)
+MIN_PITCHES_TO_DISPLAY = 50        # pitchers under this show "n/a"
+MIN_PITCHES_PER_TYPE_TO_DISPLAY = 15   # per pitch type Stuff+/Location+ rows under this show "n/a"
+USE_REGRESSED = True               # downstream modules use the *_Reg columns (raw columns are always kept)

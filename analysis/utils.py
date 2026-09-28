@@ -1,6 +1,7 @@
 """Shared helpers used across the analysis modules."""
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -32,3 +33,20 @@ def scale_100(values: pd.Series, pool: pd.Series | None = None) -> pd.Series:
     if not std:
         return values * 0 + 100
     return 100 + 10 * (values - pool.mean()) / std
+
+
+def zscore_vs(values: pd.Series, pool: pd.Series) -> pd.Series:
+    """z of `values` using `pool`'s mean and SD (e.g. the qualified pool), so small samples don't move the scale."""
+    std = pool.std()
+    if not std:
+        return values * 0
+    return (values - pool.mean()) / std
+
+
+def pct_vs_pool(values: pd.Series, pool: pd.Series) -> pd.Series:
+    """Share of `pool` at or below each value, 0-100 (equals percentile_rank for pool members, barring ties)."""
+    ranked = np.sort(pool.dropna().to_numpy())
+    if not len(ranked):
+        return values * np.nan
+    pct = 100 * np.searchsorted(ranked, values.to_numpy(), side="right") / len(ranked)
+    return pd.Series(np.where(values.isna(), np.nan, pct), index=values.index)

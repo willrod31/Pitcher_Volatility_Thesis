@@ -27,6 +27,12 @@ season; GuaranteedFuture when listed; league minimum for pre-arb years;
 max(prior salary, ARB_PCT_OF_MARKET x WAR x $/WAR) for arb years. Surplus =
 WAR x $/WAR - Salary, discounted by (1 + DISCOUNT_RATE) ** years_from_now.
 All of those rates are assumptions in config.py.
+
+Small samples: asymmetric_upside.py / volatility_discount.py now include
+pitchers under config.MIN_PITCHES_FOR_INCLUSION (Qualified = False). With
+config.USE_REGRESSED the WAR proxy and shrinkage use the regressed
+(*_Reg) Stuff+, command and volatility percentile; z-scores always use the
+qualified pool's mean/SD. Raw columns stay in the output.
 """
 import argparse
 
@@ -45,21 +51,24 @@ from config import (
     LEAGUE_MIN_SALARY_BY_YEAR,
     MAX_CONTROL_YEARS,
     REPLACEMENT_LEVEL_WAR,
+    MIN_PITCHES_TO_DISPLAY,
     SEASON,
+    USE_REGRESSED,
     VOLATILITY_SHRINKAGE,
     WAR_PER_TALENT_Z,
 )
-from analysis.asymmetric_upside import COMMAND_COLUMN, OUT_PATH as UPSIDE_PATH
+from analysis.asymmetric_upside import COMMAND_COLUMN, COMMAND_COLUMN_USED, OUT_PATH as UPSIDE_PATH, STUFF_COLUMN_USED
 from analysis.data_acquisition import filter_to_team, team_roster_ids
 from analysis.contract_status import SALARIES_PATH, estimate_contract_status, save_estimates, status_group
 from analysis.injury_history import SUMMARY_PATH as INJURY_SUMMARY_PATH
 from analysis.volatility_discount import OUT_PATH as VOLATILITY_PATH
-from analysis.utils import CACHE_DIR, zscore
+from analysis.utils import CACHE_DIR, zscore_vs
 
 OUT_PATH = CACHE_DIR / "risk_adjusted_value.parquet"
 SURPLUS_BY_YEAR_PATH = CACHE_DIR / "surplus_by_year.csv"
 
 CONTRACT_FIELDS = ["ContractStatus", "YearsControl", "PreArbYearsLeft", "ArbYearsLeft"]
+VOLATILITY_PERCENTILE_USED = "VolatilityPercentile_Reg" if USE_REGRESSED else "VolatilityPercentile"
 
 
 def league_min_salary(year: int) -> int:
@@ -87,8 +96,11 @@ def load_injury_summary() -> pd.DataFrame | None:
 
 def compute_projected_war(merged: pd.DataFrame) -> pd.DataFrame:
     merged = merged.copy()
-    # command = Location+ or the legacy proxy, per config.COMMAND_METRIC
-    talent_z = zscore(merged["StuffPlus"]) + zscore(merged[COMMAND_COLUMN])
+    # command = Location+ or the legacy proxy, per config.COMMAND_METRIC; *_Reg when config.USE_REGRESSED.
+    # Mean/SD from the qualified pool's raw values, so small samples don't move the scale.
+    pool = merged[merged["Qualified"]]
+    talent_z = (zscore_vs(merged[STUFF_COLUMN_USED], pool["StuffPlus_Scaled"])
+                + zscore_vs(merged[COMMAND_COLUMN_USED], pool[COMMAND_COLUMN]))
     merged["simple_projected_war"] = LEAGUE_AVG_STARTER_WAR + WAR_PER_TALENT_Z * talent_z
     return merged
 
@@ -115,7 +127,7 @@ def apply_risk_shrinkage(merged: pd.DataFrame) -> pd.DataFrame:
     pulled get 0 injury risk (InjuryDataPulled = False).
     """
     merged = merged.copy()
-    merged["VolatilityPercentileUsed"] = merged["VolatilityPercentile"].fillna(50)
+    merged["VolatilityPercentileUsed"] = merged[VOLATILITY_PERCENTILE_USED].fillna(50)
     merged["InjuryDataPulled"] = merged["TotalDaysMissed"].notna()
     merged["InjuryRiskScore"] = injury_risk_score(merged).fillna(0)
 
@@ -276,7 +288,9 @@ def run(team: str | None = None):
     volatility = pd.read_parquet(VOLATILITY_PATH)
 
     merged = upside.merge(
-        volatility[["PitcherId", "VolatilityPath", "VolatilityPercentile"]], on="PitcherId", how="left"
+        volatility[["PitcherId", "VolatilityPath", "Appearances", "VolatilityScore", "VolatilityScore_Reg",
+                    "VolatilityReliability", "VolatilityPercentile", "VolatilityPercentile_Reg"]],
+        on="PitcherId", how="left",
     )
     merged["VolatilityPath"] = merged["VolatilityPath"].fillna("none (50th pctile default)")
 
@@ -299,7 +313,7 @@ def run(team: str | None = None):
 
     scope = filter_to_team(merged, team) if team else merged[merged["MultiYearSurplus"].notna()].head(20)
     cols = [
-        "Pitcher", "PitcherTeam", "StuffPlus_Scaled", COMMAND_COLUMN, "VolatilityPath", "VolatilityPercentile",
+        "Pitcher", "PitcherTeam", "Qualified", STUFF_COLUMN_USED, COMMAND_COLUMN_USED, "VolatilityPath", VOLATILITY_PERCENTILE_USED,
         "InjuryRiskScore", "simple_projected_war", "risk_adjusted_war", "ContractStatus", "Salary",
         "YearsControl", "ControlYearsUsed", "SurplusCurrentSeason", "MultiYearSurplus", "SurplusPerControlYear",
     ]
@@ -315,10 +329,10 @@ def run(team: str | None = None):
 
 
 def report_ungraded(team: str, merged: pd.DataFrame):
-    """Roster pitchers missing from the ranking (under MIN_PITCHES_FOR_INCLUSION), incl. blank control in salaries.csv."""
+    """Roster pitchers missing from the ranking (under MIN_PITCHES_TO_DISPLAY), incl. blank control in salaries.csv."""
     roster = team_roster_ids(team)
     missing = roster[~roster["PitcherId"].isin(merged["PitcherId"])]
-    print(f"\n{len(missing)} {team} roster pitcher(s) not graded (under config.MIN_PITCHES_FOR_INCLUSION pitches):")
+    print(f"\n{len(missing)} {team} roster pitcher(s) not graded (under config.MIN_PITCHES_TO_DISPLAY = {MIN_PITCHES_TO_DISPLAY} pitches):")
     print(", ".join(missing["Pitcher"]) or "none")
     salaries = load_salaries()
     if salaries is not None:
