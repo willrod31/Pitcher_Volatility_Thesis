@@ -9,17 +9,26 @@ the same way the proprietary metrics are.
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
 
-from analysis.data_acquisition import CACHE_DIR, END_DATE, START_DATE, load_pitcher_season, load_season, load_season_monthly, load_team_roster_full_seasons
+from analysis.data_acquisition import CACHE_DIR, END_DATE, START_DATE, load_pitcher_season, load_season, load_season_monthly, load_team_roster_full_seasons, primary_team
+from analysis.utils import scale_100
+from config import MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_FOR_SCALE, SHOULDER_HEIGHT_FT
 
 SUMMARY_PATH = CACHE_DIR / "stuff_plus_summary.parquet"
 PITCHES_PATH = CACHE_DIR / "stuff_plus_pitches.parquet"
 
 DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "dashboard" / "data" / "stuff_plus_pitch_types.csv"
 DASHBOARD_PITCHES_PATH = Path(__file__).resolve().parent.parent / "dashboard" / "data" / "stuff_plus_pitches.csv"
+# ALL pitches (not just scored swings) for the pitch movement chart
+MOVEMENT_PITCHES_PATH = Path(__file__).resolve().parent.parent / "dashboard" / "data" / "movement_pitches.csv"
+MOVEMENT_COLUMNS = [
+    "PitcherId", "Pitcher", "PitcherTeam", "PitchType", "release_speed", "ivb", "hb",
+    "p_throws", "arm_angle", "ArmAngleSource", "release_pos_x", "release_pos_z", "release_extension",
+]
 
 # League-wide sample the model is trained on when scoring a single pitcher or
 # team: the whole season (config.START_DATE-END_DATE), pulled one calendar
@@ -36,6 +45,8 @@ RAW_TRAIN_COLUMNS = [
     "release_speed", "release_spin_rate", "release_extension",
     "spin_axis", "release_pos_z", "release_pos_x", "effective_speed",
     "pfx_z", "pfx_x", "pitch_type", "description",
+    # not model features -- carried along for the dashboard movement chart only
+    "p_throws", "arm_angle",
 ]
 
 # Model features -- same shape features the original Trackman-based script
@@ -173,6 +184,48 @@ def pitcher_level_stuff_plus(summary: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns="WeightedSum")
 
 
+def league_scale_pool(league_df: pd.DataFrame, league_summary: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The league-wide qualified pool StuffPlus_Scaled is graded against.
+
+    Returns (pitcher pool, pitcher x pitch type pool) of ratio StuffPlus values:
+    pitchers with MIN_PITCHES_FOR_INCLUSION pitches thrown, and pitcher x pitch
+    type rows with MIN_PITCHES_PER_TYPE_FOR_SCALE pitches of that type thrown.
+    One row per PitcherId (traded pitchers aren't split by team).
+    """
+    thrown = league_df.groupby("pitcher").size()
+    thrown_by_type = league_df.groupby(["pitcher", "pitch_type"]).size()
+
+    by_type = league_summary.groupby(["PitcherId", "PitchType"]).apply(
+        lambda g: (g["StuffPlus"] * g["Pitches"]).sum() / g["Pitches"].sum(), include_groups=False,
+    ).rename("StuffPlus").reset_index()
+    by_type_thrown = thrown_by_type.reindex(pd.MultiIndex.from_frame(by_type[["PitcherId", "PitchType"]])).to_numpy()
+    type_pool = by_type[by_type_thrown >= MIN_PITCHES_PER_TYPE_FOR_SCALE]
+
+    weighted = league_summary.assign(Weighted=league_summary["StuffPlus"] * league_summary["Pitches"])
+    per_pitcher = weighted.groupby("PitcherId")[["Weighted", "Pitches"]].sum()
+    per_pitcher["StuffPlus"] = per_pitcher["Weighted"] / per_pitcher["Pitches"]
+    per_pitcher = per_pitcher.reset_index()
+    pitcher_pool = per_pitcher[thrown.reindex(per_pitcher["PitcherId"]).to_numpy() >= MIN_PITCHES_FOR_INCLUSION]
+    return pitcher_pool, type_pool
+
+
+def add_scaled_stuff_plus(summary: pd.DataFrame, pitcher_level: pd.DataFrame, pitcher_pool: pd.DataFrame, type_pool: pd.DataFrame):
+    """ADD StuffPlus_Scaled = 100 + 10 * z(StuffPlus), z vs. the league-wide qualified pool.
+
+    The ratio StuffPlus column is left exactly as it is. Pitch-type rows are
+    z-scored within their own pitch type. Same scale as Location+.
+    """
+    summary = summary.copy()
+    summary["StuffPlus_Scaled"] = float("nan")
+    for pitch_type, rows in summary.groupby("PitchType"):
+        pool = type_pool.loc[type_pool["PitchType"] == pitch_type, "StuffPlus"]
+        if len(pool) >= 2:
+            summary.loc[rows.index, "StuffPlus_Scaled"] = scale_100(rows["StuffPlus"], pool).round(1)
+    pitcher_level = pitcher_level.copy()
+    pitcher_level["StuffPlus_Scaled"] = scale_100(pitcher_level["StuffPlus"], pitcher_pool["StuffPlus"]).round(1)
+    return summary, pitcher_level
+
+
 def save_for_dashboard(summary: pd.DataFrame, pitcher_level: pd.DataFrame):
     """Upsert this run's per-pitch-type Stuff+ rows into the dashboard's CSV.
 
@@ -186,9 +239,11 @@ def save_for_dashboard(summary: pd.DataFrame, pitcher_level: pd.DataFrame):
     in the file is left alone.
     """
     rows = summary.merge(
-        pitcher_level[["Pitcher", "StuffPlus"]].rename(columns={"StuffPlus": "OverallStuffPlus"}), on="Pitcher"
+        pitcher_level[["Pitcher", "StuffPlus", "StuffPlus_Scaled"]].rename(
+            columns={"StuffPlus": "OverallStuffPlus", "StuffPlus_Scaled": "OverallStuffPlus_Scaled"}), on="Pitcher"
     )
-    rows = rows[["Pitcher", "PitcherId", "PitcherTeam", "PitchType", "Pitches", "StuffPlus", "OverallStuffPlus"]]
+    rows = rows[["Pitcher", "PitcherId", "PitcherTeam", "PitchType", "Pitches", "StuffPlus", "StuffPlus_Scaled",
+                 "OverallStuffPlus", "OverallStuffPlus_Scaled"]]
     pitchers_in_run = rows["Pitcher"].unique()
 
     DASHBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +269,40 @@ def save_pitches_for_dashboard(per_pitch: pd.DataFrame):
 
     rows.to_csv(DASHBOARD_PITCHES_PATH, index=False)
     print(f"Saved {len(rows)} pitch row(s) to {DASHBOARD_PITCHES_PATH} for the dashboard")
+
+
+def estimate_arm_angle(df: pd.DataFrame) -> pd.Series:
+    """APPROXIMATE arm angle (degrees above horizontal) from release point.
+
+    degrees(atan2(release height - SHOULDER_HEIGHT_FT, |release side|)). Only
+    used when Statcast has no arm_angle for a pitcher at all.
+    """
+    return np.degrees(np.arctan2(df["release_pos_z"] - SHOULDER_HEIGHT_FT, df["release_pos_x"].abs()))
+
+
+def save_movement_for_dashboard(scope_df: pd.DataFrame):
+    """Upsert every pitch (not just swings) for this run's pitchers, for the movement chart.
+
+    arm_angle is Statcast's when the pitcher has any (ArmAngleSource =
+    "Statcast"; the odd null pitch stays null); a pitcher with none at all
+    gets the release-point estimate on every pitch ("release-point estimate").
+    """
+    rows = scope_df.rename(columns={"pitcher": "PitcherId", "pitch_type": "PitchType"}).copy()
+    if "arm_angle" not in rows:
+        rows["arm_angle"] = np.nan
+    rows["arm_angle"] = rows["arm_angle"].astype(float)
+    has_statcast = rows.groupby("PitcherId")["arm_angle"].transform(lambda s: s.notna().any())
+    rows["ArmAngleSource"] = np.where(has_statcast, "Statcast", "release-point estimate")
+    rows.loc[~has_statcast, "arm_angle"] = estimate_arm_angle(rows.loc[~has_statcast])
+    rows = rows[MOVEMENT_COLUMNS]
+
+    MOVEMENT_PITCHES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if MOVEMENT_PITCHES_PATH.exists():
+        existing = pd.read_csv(MOVEMENT_PITCHES_PATH)
+        existing = existing[~existing["PitcherId"].isin(rows["PitcherId"].unique())]
+        rows = pd.concat([existing, rows], ignore_index=True)
+    rows.to_csv(MOVEMENT_PITCHES_PATH, index=False)
+    print(f"Saved {len(rows)} pitch row(s) to {MOVEMENT_PITCHES_PATH} for the movement chart")
 
 
 def run(start_date: str, end_date: str, pitcher: str | None = None, team: str | None = None, force_refresh: bool = False):
@@ -242,12 +331,21 @@ def run(start_date: str, end_date: str, pitcher: str | None = None, team: str | 
 
         per_pitch = score_stuff_plus(scope_df, models)
         summary = summarize_stuff_plus(per_pitch)
+
+        # League-wide pool for StuffPlus_Scaled: score the whole training season
+        # with the same models (one row per pitcher, not per pitcher-team).
+        print("\nScoring the league-wide pool for StuffPlus_Scaled...")
+        league_scoring = train_df.assign(PitcherTeam=train_df["pitcher"].map(primary_team(train_df)))
+        league_summary = summarize_stuff_plus(score_stuff_plus(league_scoring, models))
+        pitcher_pool, type_pool = league_scale_pool(train_df, league_summary)
     else:
         print(f"Pulling league-wide Statcast data {start_date} to {end_date}...")
         df = load_season(start_date, end_date, force_refresh=force_refresh)
         print(f"Loaded {len(df)} cleaned pitches")
         per_pitch, summary = build_stuff_plus(df)
+        pitcher_pool, type_pool = league_scale_pool(df, summary)
 
+    summary, _ = add_scaled_stuff_plus(summary, pitcher_level_stuff_plus(summary), pitcher_pool, type_pool)
     per_pitch.to_parquet(PITCHES_PATH, index=False)
     summary.to_parquet(SUMMARY_PATH, index=False)
 
@@ -258,6 +356,7 @@ def run(start_date: str, end_date: str, pitcher: str | None = None, team: str | 
 
     if pitcher or team:
         pitcher_level = pitcher_level_stuff_plus(summary)
+        _, pitcher_level = add_scaled_stuff_plus(summary, pitcher_level, pitcher_pool, type_pool)
         if pitcher_level.empty:
             scope = pitcher or team
             raise ValueError(f"'{scope}' not found in the Stuff+ summary (not enough qualifying pitches this range)")
@@ -265,6 +364,7 @@ def run(start_date: str, end_date: str, pitcher: str | None = None, team: str | 
         print(pitcher_level.sort_values("StuffPlus", ascending=False).to_string(index=False))
         save_for_dashboard(summary, pitcher_level)
         save_pitches_for_dashboard(per_pitch)
+        save_movement_for_dashboard(scope_df)
 
 
 if __name__ == "__main__":

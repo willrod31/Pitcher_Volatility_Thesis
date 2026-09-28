@@ -253,7 +253,32 @@ def load_season_monthly(start_date: str = START_DATE, end_date: str = END_DATE, 
 
 
 def filter_qualified(df: pd.DataFrame, min_pitches: int = MIN_PITCHES_FOR_INCLUSION) -> pd.DataFrame:
-    """Drop pitchers below the season pitch-count threshold in config.py."""
-    counts = df.groupby("Pitcher").size()
+    """Drop pitchers below the season pitch-count threshold in config.py.
+
+    Counted by MLBAM id, not name, so two pitchers who share a name aren't merged.
+    """
+    counts = df.groupby("pitcher").size()
     qualified = counts[counts >= min_pitches].index
-    return df[df["Pitcher"].isin(qualified)]
+    return df[df["pitcher"].isin(qualified)]
+
+
+def primary_team(df: pd.DataFrame) -> pd.Series:
+    """PitcherTeam each pitcher threw the most pitches for, indexed by MLBAM id.
+
+    League-wide grading is per pitcher, not per pitcher-team, so a traded
+    pitcher gets one row -- labeled with the team he threw most for.
+    """
+    counts = df.groupby(["pitcher", "PitcherTeam"]).size().rename("n").reset_index()
+    top = counts.sort_values("n", ascending=False).drop_duplicates("pitcher")
+    return top.set_index("pitcher")["PitcherTeam"]
+
+
+def filter_to_team(graded: pd.DataFrame, team: str) -> pd.DataFrame:
+    """Keep only pitchers on `team`'s roster (same roster as stuff_plus_proxy.py --team).
+
+    Includes pitchers traded to/from the team, graded on their full season,
+    and relabels PitcherTeam to `team` -- the same convention as the Stuff+
+    dashboard export.
+    """
+    roster_ids = set(team_roster_ids(team)["PitcherId"])
+    return graded[graded["PitcherId"].isin(roster_ids)].assign(PitcherTeam=team)
