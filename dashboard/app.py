@@ -8,9 +8,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(1, str(Path(__file__).parent.parent))
 from colors import (  # noqa: E402  (dashboard-local helper module)
-    BAD_COLOR, GOOD_COLOR, NEUTRAL_COLOR, NEUTRAL_TEXT_LIGHT, LeaguePools, colored_numbers, legend_html, rgba, stat_color, stat_html,
+    BAD_COLOR, GOOD_COLOR, NEUTRAL_COLOR, NEUTRAL_TEXT_LIGHT, LeaguePools, colored_numbers, is_small_sample, legend_html, rgba,
+    stat_color, stat_html,
 )
+from config import END_DATE, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, START_DATE  # noqa: E402
 
 st.set_page_config(
     page_title="Pitcher Valuation Dashboard",
@@ -24,6 +27,8 @@ MOVEMENT_PITCHES_PATH = DATA_DIR / "movement_pitches.csv"   # every pitch, for t
 LOCATION_PLUS_PATH = DATA_DIR / "location_plus_pitch_types.csv"  # from analysis/location_plus_proxy.py
 REPORT_PATH = DATA_DIR / "pitcher_report_data.csv"          # from analysis/export_report_data.py
 SURPLUS_BY_YEAR_PATH = DATA_DIR / "surplus_by_year.csv"     # from analysis/export_report_data.py
+VELOCITY_PATH = DATA_DIR / "velocity_by_game.csv"           # from analysis/stuff_plus_proxy.py --team/--pitcher
+INJURY_STINTS_PATH = DATA_DIR / "injury_stints.csv"         # from analysis/export_report_data.py
 
 # Every MLB team, by league -- (Statcast team code, full name). Lets the
 # sidebar navigate the whole league even though only a handful of pitchers
@@ -92,8 +97,13 @@ PITCH_TYPE_NAMES = {
 BASELINE_COLOR = "#8A8F98"    # the 100 reference line
 
 
+def data_version() -> float:
+    """Newest modification time in dashboard/data -- part of each loader's cache key, so a re-export is picked up."""
+    return max((f.stat().st_mtime for f in DATA_DIR.glob("*.csv")), default=0.0)
+
+
 @st.cache_data
-def load_real_stuff_plus():
+def load_real_stuff_plus(data_version: float):
     if not STUFF_PLUS_SUMMARY_PATH.exists():
         return None, None
     summary = pd.read_csv(STUFF_PLUS_SUMMARY_PATH)
@@ -104,19 +114,34 @@ def load_real_stuff_plus():
 
 
 @st.cache_data
-def load_location_plus():
+def load_location_plus(data_version: float):
     """League-wide Location+ per pitcher x pitch type (+ overall), keyed on PitcherId. None until run."""
     return pd.read_csv(LOCATION_PLUS_PATH) if LOCATION_PLUS_PATH.exists() else None
 
 
 @st.cache_data
-def load_report_data():
+def load_report_data(data_version: float):
     """Risk-adjusted value + multi-year surplus, keyed on PitcherId. (None, None) until exported."""
     if not REPORT_PATH.exists():
         return None, None
     report = pd.read_csv(REPORT_PATH)
     by_year = pd.read_csv(SURPLUS_BY_YEAR_PATH) if SURPLUS_BY_YEAR_PATH.exists() else pd.DataFrame()
     return report, by_year
+
+
+@st.cache_data
+def load_velocity(data_version: float):
+    """Per-appearance primary fastball velocity, and IL stints (either may be empty)."""
+    velocity = pd.read_csv(VELOCITY_PATH, parse_dates=["game_date"]) if VELOCITY_PATH.exists() else pd.DataFrame()
+    stints = pd.read_csv(INJURY_STINTS_PATH, parse_dates=["StartDate", "EndDate"]) if INJURY_STINTS_PATH.exists() else pd.DataFrame()
+    return velocity, stints
+
+
+def with_sample(value, n, unit: str, fmt="{:.0f}") -> str:
+    """ "112 (140 pitches)" -- or "n/a" when there's no value. """
+    if value is None or pd.isna(value):
+        return "n/a"
+    return f"{fmt.format(value)} ({n:,.0f} {unit})" if n is not None and pd.notna(n) else fmt.format(value)
 
 
 # Same good/bad scale as every other number: blue = overpaid, gray = break-even, red = surplus.
@@ -232,8 +257,9 @@ def movement_chart(pitches: pd.DataFrame, stuff_rows: pd.DataFrame | None = None
     pitches["hb_arm"] = np.where(pitches["p_throws"] == "R", -pitches["hb"], pitches["hb"])
     counts = pitches["PitchType"].value_counts()
     total = len(pitches)
-    stuff = stuff_rows.set_index("PitchType")["StuffPlus_Scaled"] if stuff_rows is not None and "StuffPlus_Scaled" in stuff_rows else pd.Series(dtype=float)
-    location = location_rows.set_index("PitchType")["LocationPlus"] if location_rows is not None and not location_rows.empty else pd.Series(dtype=float)
+    stuff = per_type(stuff_rows, ["StuffPlus_Scaled_Reg"])["StuffPlus_Scaled_Reg"]
+    location = per_type(location_rows, ["LocationPlus_Reg"])["LocationPlus_Reg"]
+    stuff_rel = per_type(stuff_rows, ["StuffPlus_Reliability"])["StuffPlus_Reliability"]
 
     fig = go.Figure()
     shown_types = [p for p in pitch_order(counts.index) if counts[p] >= MIN_PITCHES_FOR_BUBBLE]
@@ -257,10 +283,11 @@ def movement_chart(pitches: pd.DataFrame, stuff_rows: pd.DataFrame | None = None
             f"Velo: {group['release_speed'].mean():.1f} mph<br>"
             f"IVB: {group['ivb'].mean():.1f} in<br>"
             f"HB (arm side +): {group['hb_arm'].mean():.1f} in<br>"
-            f"Stuff+: {stuff_text} · Location+: {location_text}<extra></extra>"
+            f"Stuff+: {stuff_text} · Location+: {location_text} (regressed)<extra></extra>"
         )
         stuff_value = stuff.get(pitch_type) if pitch_type in stuff.index else None
-        outline = stat_color(stuff_value, 100, 10, True)  # red/blue by this pitch's Stuff+ vs. its pitch type
+        # red/blue by this pitch's Stuff+ vs. its pitch type, faded by reliability
+        outline = stat_color(stuff_value, 100, 10, True, reliability=stuff_rel.get(pitch_type))
         fig.add_trace(go.Scatter(
             x=xs, y=ys, mode="lines", fill="toself",
             fillcolor=rgba(color, 0.35),
@@ -313,31 +340,85 @@ def movement_chart(pitches: pd.DataFrame, stuff_rows: pd.DataFrame | None = None
     return fig
 
 
+VELO_LINE_COLOR = "#0072B2"   # same blue as the four-seam everywhere else
+IL_FILL = "rgba(216, 33, 41, 0.12)"
+
+
+def velocity_chart(games: pd.DataFrame, stints: pd.DataFrame) -> go.Figure:
+    """Average primary-fastball velocity per appearance, season mean (dashed) +/- 1 SD band, IL stints shaded."""
+    ink = chart_ink()
+    games = games.sort_values("game_date")
+    mean, sd = games["AvgVelo"].mean(), games["AvgVelo"].std()
+    fig = go.Figure()
+    if pd.notna(sd):
+        fig.add_hrect(y0=mean - sd, y1=mean + sd, fillcolor="rgba(128,128,128,0.15)", line_width=0, layer="below")
+    fig.add_hline(y=mean, line_dash="dash", line_color=BASELINE_COLOR, line_width=1.5,
+                  annotation_text=f"Season avg {mean:.1f}", annotation_position="top left",
+                  annotation_font=dict(size=11, color=ink))
+
+    season_start, season_end = pd.Timestamp(START_DATE), pd.Timestamp(END_DATE)
+    for _, stint in stints.iterrows():  # one row per stint per season; clipped to this season below
+        start = max(stint["StartDate"], season_start)
+        end = min(stint["EndDate"] if pd.notna(stint["EndDate"]) else season_end, season_end)
+        if start > end:
+            continue
+        fig.add_vrect(x0=start, x1=end, fillcolor=IL_FILL, line_width=0, layer="below",
+                      annotation_text=f"IL: {stint['BodyPart'] if pd.notna(stint['BodyPart']) else 'injury'}",
+                      annotation_position="top left", annotation_font=dict(size=10, color=ink))
+
+    fig.add_trace(go.Scatter(
+        x=games["game_date"], y=games["AvgVelo"], mode="lines+markers",
+        line=dict(width=2, color=VELO_LINE_COLOR), marker=dict(size=8, color=VELO_LINE_COLOR, line=dict(width=2, color="white")),
+        customdata=games[["Opponent", "PitchesThrown", "FastballPitches"]].values,
+        hovertemplate=("%{x|%b %d, %Y} vs. %{customdata[0]}<br>Avg velo: %{y:.1f} mph"
+                       "<br>Pitches thrown: %{customdata[1]} (%{customdata[2]} " + games["PitchType"].iloc[0] + ")<extra></extra>"),
+        showlegend=False,
+    ))
+    pad = max(sd if pd.notna(sd) else 0, 0.5) * 3
+    fig.update_yaxes(title=f"Avg {games['PitchType'].iloc[0]} velocity (mph)",
+                     range=[games["AvgVelo"].min() - pad / 3, games["AvgVelo"].max() + pad / 3],
+                     gridcolor="rgba(128,128,128,0.2)")
+    fig.update_xaxes(title="Game date", range=[season_start, season_end], showgrid=False)
+    fig.update_layout(height=520, margin=dict(t=10, l=60, r=10, b=55), hovermode="closest")
+    return fig
+
+
 SCALE_CAPTION = "100 = league average, 10 points = 1 standard deviation."
 STUFF_COLOR = "#0072B2"      # team scatter points
 
 
-def stuff_location_bar_chart(stuff_rows: pd.DataFrame, location_rows: pd.DataFrame) -> go.Figure:
-    """Grouped bars per pitch type: Stuff+ (scaled, solid) next to Location+ (hatched).
+def per_type(rows: pd.DataFrame | None, cols: list[str]) -> pd.DataFrame:
+    if rows is None or rows.empty or not set(cols) <= set(rows.columns):
+        return pd.DataFrame(columns=cols)
+    return rows.set_index("PitchType")[cols]
+
+
+def stuff_location_bar_chart(stuff_rows: pd.DataFrame, location_rows: pd.DataFrame, types: list[str]) -> go.Figure:
+    """Grouped bars per pitch type (in `types` order): regressed Stuff+ (solid) next to regressed Location+ (hatched).
 
     Bar color = stat_color of that bar's value (red = better than league
-    average, blue = worse); the solid/hatched pattern tells the two apart.
+    average, blue = worse), faded toward gray by its reliability; the
+    solid/hatched pattern tells the two apart. * = small sample.
     """
-    stuff = stuff_rows.set_index("PitchType")["StuffPlus_Scaled"] if "StuffPlus_Scaled" in stuff_rows else pd.Series(dtype=float)
-    location = location_rows.set_index("PitchType")["LocationPlus"] if location_rows is not None else pd.Series(dtype=float)
-    types = [p for p in pitch_order(set(stuff.index) | set(location.index))]
+    stuff = per_type(stuff_rows, ["StuffPlus_Scaled_Reg", "StuffPlus_Scaled", "Pitches", "StuffPlus_Reliability"])
+    location = per_type(location_rows, ["LocationPlus_Reg", "LocationPlus", "Pitches", "LocationPlus_Reliability"])
+    types = [p for p in types if p in stuff.index or p in location.index]
 
     fig = go.Figure()
-    for name, values, pattern in [("Stuff+", stuff, ""), ("Location+", location, "/")]:
-        y = [values.get(p) for p in types]
-        colors = [stat_color(v, 100, 10, True) or BASELINE_COLOR for v in y]
+    for name, table, pattern in [("Stuff+", stuff, ""), ("Location+", location, "/")]:
+        table = table.reindex(types)
+        reg, raw, n, rel = (table.iloc[:, i] for i in range(4))
+        y = [None if pd.isna(v) else v for v in reg]
+        colors = [stat_color(v, 100, 10, True, reliability=r) or BASELINE_COLOR for v, r in zip(y, rel)]
         fig.add_trace(go.Bar(
             name=name, x=types, y=y, showlegend=False,
             marker=dict(color=colors, pattern=dict(shape=pattern, fgcolor="rgba(255,255,255,0.8)", size=6, fillmode="overlay"),
                         line=dict(width=2, color="rgba(255,255,255,0.9)")),
-            text=[f"{v:.0f}" if v is not None and pd.notna(v) else "n/a" for v in y],
+            text=[("n/a" if v is None else f"{v:.0f}" + ("*" if is_small_sample(r) else "")) for v, r in zip(y, rel)],
             textposition="outside",
-            hovertemplate=f"%{{x}}: {name} %{{y:.1f}}<extra></extra>",
+            customdata=np.column_stack([raw, n, rel]),
+            hovertemplate=(f"%{{x}}: {name} %{{y:.1f}} (regressed)<br>Raw: %{{customdata[0]:.1f}}"
+                           "<br>Pitches: %{customdata[1]:.0f} · Reliability: %{customdata[2]:.2f}<extra></extra>"),
         ))
         # legend-only swatch in neutral gray, so the key shows the pattern, not one bar's color
         fig.add_trace(go.Bar(
@@ -345,7 +426,7 @@ def stuff_location_bar_chart(stuff_rows: pd.DataFrame, location_rows: pd.DataFra
             marker=dict(color=BASELINE_COLOR, pattern=dict(shape=pattern, fgcolor="rgba(255,255,255,0.8)", size=6, fillmode="overlay")),
         ))
     fig.add_hline(y=100, line_dash="dash", line_color=BASELINE_COLOR)  # axis title carries "100 = league avg"
-    top = np.nanmax([v for v in list(stuff) + list(location) if v is not None] + [100])
+    top = np.nanmax(list(stuff["StuffPlus_Scaled_Reg"]) + list(location["LocationPlus_Reg"]) + [100])
     fig.update_yaxes(range=[0, top * 1.15])
     fig.update_layout(
         barmode="group",
@@ -387,8 +468,8 @@ def stuff_location_scatter(staff: pd.DataFrame) -> go.Figure:
             align="right",
         )
     fig.update_layout(
-        xaxis_title="Stuff+ (scaled)",
-        yaxis_title="Location+",
+        xaxis_title="Stuff+ (scaled, regressed)",
+        yaxis_title="Location+ (regressed)",
         legend=dict(orientation="h", y=1.08, x=0),
         margin=dict(t=30, l=10, r=10, b=10),
         height=460,
@@ -396,9 +477,10 @@ def stuff_location_scatter(staff: pd.DataFrame) -> go.Figure:
     return fig
 
 
-stuff_plus_summary, stuff_plus_pitches = load_real_stuff_plus()
-location_plus = load_location_plus()
-report_data, surplus_by_year = load_report_data()
+stuff_plus_summary, stuff_plus_pitches = load_real_stuff_plus(data_version())
+location_plus = load_location_plus(data_version())
+report_data, surplus_by_year = load_report_data(data_version())
+velocity_games, injury_stints = load_velocity(data_version())
 # league-wide qualified pool for every color; darker league-average gray for numbers on white
 pools = LeaguePools(report_data, neutral=NEUTRAL_COLOR if is_dark_theme() else NEUTRAL_TEXT_LIGHT)
 chart_pools = LeaguePools(report_data)   # chart fills keep the standard #BFBFBF midpoint
@@ -457,16 +539,12 @@ with tab_report:
             st.caption(team_name_choice)
 
         pitcher_stuff_rows = stuff_plus_summary[stuff_plus_summary["PitcherId"] == pitcher_id]
-        stuff_scaled = (
-            pitcher_stuff_rows["OverallStuffPlus_Scaled"].iloc[0]
-            if "OverallStuffPlus_Scaled" in pitcher_stuff_rows else float("nan")
-        )
+        stuff_overall = pitcher_stuff_rows.iloc[0]
         pitcher_location_rows = (
             location_plus[location_plus["PitcherId"] == pitcher_id] if location_plus is not None else None
         )
         location_overall = (
-            pitcher_location_rows["OverallLocationPlus"].iloc[0]
-            if pitcher_location_rows is not None and not pitcher_location_rows.empty else float("nan")
+            pitcher_location_rows.iloc[0] if pitcher_location_rows is not None and not pitcher_location_rows.empty else None
         )
 
         report_row = (
@@ -476,40 +554,59 @@ with tab_report:
 
         st.markdown(legend_html(), unsafe_allow_html=True)
 
+        def value_of(row, col):
+            return None if row is None or col not in row or pd.isna(row[col]) else row[col]
+
         def report_value(col):
-            return None if report_row is None or pd.isna(report_row[col]) else report_row[col]
+            return value_of(report_row, col)
 
         def money(v):
             return f"{'-' if v < 0 else ''}${abs(v):.1f}M"
 
-        # (label, metric key in colors.METRIC_DIRECTION, value, formatter)
+        # (label, metric key in colors.METRIC_DIRECTION, regressed value, raw value, n, unit, reliability, formatter)
         cards = [
-            ("Stuff+", "StuffPlus_Scaled", None if pd.isna(stuff_scaled) else stuff_scaled, "{:.1f}".format),
-            ("Location+", "LocationPlus", None if pd.isna(location_overall) else location_overall, "{:.1f}".format),
-            ("Volatility percentile", "VolatilityPercentile", report_value("VolatilityPercentile"), "{:.0f}".format),
-            ("Risk-adj. WAR proxy", "RiskAdjWAR", report_value("RiskAdjWAR"), "{:.2f}".format),
-            ("Multi-yr surplus", "MultiYearSurplus_M", report_value("MultiYearSurplus_M"), money),
+            ("Stuff+", "StuffPlus_Scaled_Reg", value_of(stuff_overall, "OverallStuffPlus_Scaled_Reg"),
+             value_of(stuff_overall, "OverallStuffPlus_Scaled"), value_of(stuff_overall, "OverallPitches"), "pitches",
+             value_of(stuff_overall, "OverallStuffPlus_Reliability"), "{:.0f}"),
+            ("Location+", "LocationPlus_Reg", value_of(location_overall, "OverallLocationPlus_Reg"),
+             value_of(location_overall, "OverallLocationPlus"), value_of(location_overall, "OverallPitches"), "pitches",
+             value_of(location_overall, "OverallLocationPlus_Reliability"), "{:.0f}"),
+            ("Volatility percentile", "VolatilityPercentile", report_value("VolatilityPercentile_Reg"),
+             report_value("VolatilityPercentile"), report_value("Appearances"), "apps",
+             report_value("VolatilityReliability"), "{:.0f}"),
+            ("Risk-adj. WAR proxy", "RiskAdjWAR", report_value("RiskAdjWAR"), None, None, None, None, "{:.2f}"),
+            ("Multi-yr surplus", "MultiYearSurplus_M", report_value("MultiYearSurplus_M"), None, None, None, None, None),
         ]
-        for col, (label, metric, value, formatter) in zip(st.columns(5), cards):
-            text = "n/a" if value is None else formatter(value)
+        for col, (label, metric, value, raw, n, unit, rel, fmt) in zip(st.columns(5), cards):
+            if value is None:
+                text, sample = "n/a", None
+            else:
+                text = money(value) if fmt is None else fmt.format(value)
+                sample = f"{n:,.0f} {unit}" if n is not None else None
+            hover = None
+            if raw is not None:
+                hover = f"Raw (unregressed): {fmt.format(raw)}" + (f" · Reliability {rel:.2f}" if rel is not None else "")
+            elif unit is None and value is not None:
+                hover = "Built from the regressed Stuff+, Location+ and volatility values"
             col.markdown(
-                stat_html(label, text, pools.color(metric, value), pools.percentile(metric, value)),
+                stat_html(label, text, pools.color(metric, value, 1.0 if rel is None else rel), pools.percentile(metric, value),
+                          sample_text=sample, hover=hover, small_sample=value is not None and is_small_sample(rel)),
                 unsafe_allow_html=True,
             )
 
-        st.caption(SCALE_CAPTION + " Percentile = share of the league pool this pitcher is better than.")
+        st.caption(SCALE_CAPTION + " Percentile = share of the qualified league pool this pitcher is better than. "
+                   "Hover a number for its raw (unregressed) value.")
 
         if report_row is None:
             st.info(
-                "Stuff+ is real: trained on the full 2025 league-wide season, then "
-                "scored against this pitcher's own full 2025 season (including time "
-                "with another team if traded). This pitcher is under "
-                "config.MIN_PITCHES_FOR_INCLUSION pitches, so has no risk-adjusted value "
-                "(Stuff+/Location+ above are still graded against the league's qualified pool)."
+                f"This pitcher threw under config.MIN_PITCHES_TO_DISPLAY ({MIN_PITCHES_TO_DISPLAY}) pitches, "
+                "so there are no regressed grades or risk-adjusted value to show."
             )
         else:
             st.caption(
-                f"Graded against every qualified MLB pitcher. Volatility path: {report_row['VolatilityPath']}. "
+                ("" if report_row.get("Qualified", True) else
+                 f"Under {MIN_PITCHES_FOR_INCLUSION} pitches: shown with regressed values, not in the league grading pool. ")
+                + f"Graded against every qualified MLB pitcher. Volatility path: {report_row['VolatilityPath']}. "
                 f"Contract: {report_row['ContractStatus']}, {report_row['YearsControl']:.0f} year(s) of control "
                 f"({report_row['ControlSource']}). WAR is an uncalibrated proxy (see README)."
             )
@@ -538,18 +635,32 @@ with tab_report:
                 st.caption("Re-run `python -m analysis.stuff_plus_proxy --team XXX` to export movement data.")
 
         with right:
-            st.markdown("**Velocity by start (placeholder chart)**")
-            st.caption("line chart of velocity across starts.")
-            st.empty()
+            pitcher_games = (
+                velocity_games[velocity_games["PitcherId"] == pitcher_id] if not velocity_games.empty else pd.DataFrame()
+            )
+            if pitcher_games.empty:
+                st.markdown("**Fastball velocity by appearance**")
+                st.caption("Re-run `python -m analysis.stuff_plus_proxy --team XXX` to export per-game velocity.")
+            else:
+                fastball = pitcher_games["PitchType"].iloc[0]
+                st.markdown(f"**{PITCH_TYPE_NAMES.get(fastball, fastball)} velocity by appearance**")
+                pitcher_stints = (
+                    injury_stints[injury_stints["PitcherId"] == pitcher_id] if not injury_stints.empty else pd.DataFrame()
+                )
+                st.plotly_chart(velocity_chart(pitcher_games, pitcher_stints), width='stretch')
+                st.caption("Dashed line = season average, gray band = ±1 SD across appearances, "
+                           "red spans = IL stints this season. Primary fastball: FF, else SI, else FC.")
+
+        # one pitch-type order everywhere below: most used first
+        usage_counts = pitcher_pitches["PitchType"].value_counts()
+        used_types = list(usage_counts.index) + sorted(set(pitcher_summary["PitchType"]) - set(usage_counts.index))
 
         st.markdown("**Stuff+ and Location+ by pitch type**")
-        st.plotly_chart(stuff_location_bar_chart(pitcher_summary, pitcher_location_rows), width='stretch')
-        st.caption(SCALE_CAPTION + " Stuff+ here is StuffPlus_Scaled (ratio StuffPlus stays in the data files). Hatched bars = Location+.")
+        st.plotly_chart(stuff_location_bar_chart(pitcher_summary, pitcher_location_rows, used_types), width='stretch')
+        st.caption(SCALE_CAPTION + " Regressed values (hover for raw); faded color = less reliable, * = small sample "
+                   f"(reliability < 0.5). Pitch types under {MIN_PITCHES_PER_TYPE_TO_DISPLAY} pitches show n/a. "
+                   "Hatched bars = Location+. Ordered by usage.")
 
-
-        used_types = pitch_order(
-            set(pitcher_pitches["PitchType"].unique()) | set(pitcher_summary["PitchType"].unique())
-        )
         key_line = " · ".join(f"**{p}** {PITCH_TYPE_NAMES.get(p, 'Unknown')}" for p in used_types)
         st.caption(f"Pitch type key: {key_line}")
 
@@ -560,31 +671,38 @@ with tab_report:
                 Pitches=("ivb", "size"), Velo=("release_speed", "mean"), IVB=("ivb", "mean"), HB=("hb_arm", "mean"),
             )
             arsenal["Usage"] = arsenal["Pitches"] / arsenal["Pitches"].sum()
-            arsenal["Stuff+"] = (
-                pitcher_summary.set_index("PitchType")["StuffPlus_Scaled"] if "StuffPlus_Scaled" in pitcher_summary else np.nan
-            )
-            arsenal["Location+"] = (
-                pitcher_location_rows.set_index("PitchType")["LocationPlus"]
-                if pitcher_location_rows is not None and not pitcher_location_rows.empty else np.nan
-            )
+            stuff_types = per_type(pitcher_summary, ["StuffPlus_Scaled_Reg", "StuffPlus_Scaled", "StuffPlus_Reliability"])
+            location_types = per_type(pitcher_location_rows, ["LocationPlus_Reg", "LocationPlus", "LocationPlus_Reliability"])
+            arsenal["Stuff+"] = stuff_types["StuffPlus_Scaled_Reg"]
+            arsenal["Location+"] = location_types["LocationPlus_Reg"]
+            arsenal["Stuff+ raw"] = stuff_types["StuffPlus_Scaled"]
+            arsenal["Location+ raw"] = location_types["LocationPlus"]
+            stuff_rel = stuff_types["StuffPlus_Reliability"].reindex(arsenal.index)
+            location_rel = location_types["LocationPlus_Reliability"].reindex(arsenal.index)
+            arsenal["Sample"] = [
+                "small" if is_small_sample(a) or is_small_sample(b) else "" for a, b in zip(stuff_rel, location_rel)
+            ]
             arsenal = arsenal.sort_values(["Usage", "Pitches"], ascending=False)
             arsenal.insert(0, "Pitch", [PITCH_TYPE_NAMES.get(p, p) for p in arsenal.index])
             arsenal = arsenal.rename(columns={"Velo": "Velo (mph)", "HB": "HB (in, arm side +)", "IVB": "IVB (in)"})
 
             # Stuff+/Location+ are already graded within each pitch type (100 = league avg for that pitch)
             cell_colors = pd.DataFrame(None, index=arsenal.index, columns=arsenal.columns, dtype=object)
-            cell_colors["Stuff+"] = [stat_color(v, 100, 10, True, pools.neutral) for v in arsenal["Stuff+"]]
-            cell_colors["Location+"] = [stat_color(v, 100, 10, True, pools.neutral) for v in arsenal["Location+"]]
+            cell_colors["Stuff+"] = [stat_color(v, 100, 10, True, pools.neutral, stuff_rel.get(p)) for p, v in arsenal["Stuff+"].items()]
+            cell_colors["Location+"] = [
+                stat_color(v, 100, 10, True, pools.neutral, location_rel.get(p)) for p, v in arsenal["Location+"].items()
+            ]
 
             st.markdown("**Pitch arsenal**")
             st.dataframe(
                 colored_numbers(arsenal, cell_colors, {
                     "Velo (mph)": "{:.1f}", "IVB (in)": "{:.1f}", "HB (in, arm side +)": "{:.1f}",
-                    "Usage": "{:.1%}", "Stuff+": "{:.0f}", "Location+": "{:.0f}",
+                    "Usage": "{:.1%}", "Stuff+": "{:.0f}", "Location+": "{:.0f}", "Stuff+ raw": "{:.0f}", "Location+ raw": "{:.0f}",
                 }),
                 width='stretch',
             )
-            st.caption("Stuff+ and Location+ compare each pitch to the league's pitches of that type. " + SCALE_CAPTION)
+            st.caption("Stuff+ and Location+ compare each pitch to the league's pitches of that type, regressed toward "
+                       "100 by sample size (raw columns unregressed; faded color = less reliable). " + SCALE_CAPTION)
 
 
 # Tab 2: team view, ranked by multi-year surplus
@@ -608,24 +726,36 @@ with tab_board:
         team_ids = (
             stuff_plus_summary.loc[stuff_plus_summary["PitcherTeam"] == team_choice]
             .drop_duplicates("PitcherId")
-            .assign(StuffScaled=lambda t: t["OverallStuffPlus_Scaled"] if "OverallStuffPlus_Scaled" in t else float("nan"))
-            [["PitcherId", "Pitcher", "StuffScaled"]]
+            .rename(columns={"OverallStuffPlus_Scaled_Reg": "StuffScaled", "OverallStuffPlus_Reliability": "StuffReliability"})
+            [["PitcherId", "Pitcher", "PitchesThrown", "StuffScaled", "StuffReliability"]]
         )
         if location_plus is not None:
-            overall_location = location_plus.drop_duplicates("PitcherId")[["PitcherId", "OverallLocationPlus", "OverallQualified"]]
+            overall_location = location_plus.drop_duplicates("PitcherId")[
+                ["PitcherId", "OverallLocationPlus_Reg", "OverallLocationPlus_Reliability", "OverallQualified"]
+            ].rename(columns={"OverallLocationPlus_Reg": "OverallLocationPlus", "OverallLocationPlus_Reliability": "LocationReliability"})
             team_ids = team_ids.merge(overall_location, on="PitcherId", how="left")
         else:
-            team_ids = team_ids.assign(OverallLocationPlus=float("nan"), OverallQualified=False)
+            team_ids = team_ids.assign(OverallLocationPlus=float("nan"), LocationReliability=float("nan"), OverallQualified=False)
+        team_ids["OverallQualified"] = team_ids["OverallQualified"].fillna(False).astype(bool)
         team_table = team_ids.merge(
-            report_data.drop(columns=["Pitcher", "StuffPlus", "StuffPlus_Scaled", "LocationPlus"]), on="PitcherId", how="left")
+            report_data.drop(columns=["Pitcher", "StuffPlus", "StuffPlus_Scaled", "LocationPlus", "Pitches", "Qualified"]),
+            on="PitcherId", how="left")
+        team_table["Sample"] = [
+            "small" if is_small_sample(a) or is_small_sample(b) else ""
+            for a, b in zip(team_table["StuffReliability"], team_table["LocationReliability"])
+        ]
         team_table = team_table.sort_values("MultiYearSurplus_M", ascending=False, na_position="last")
 
         shown = team_table.rename(columns={
             "StuffScaled": "Stuff+", "OverallLocationPlus": "Location+", "RiskAdjWAR": "Risk-adj. WAR", "Salary_M": "2025 salary ($M)",
             "YearsControl": "Years of control", "MultiYearSurplus_M": "Multi-yr surplus ($M)",
-            "SurplusCurrentSeason_M": "2025 surplus ($M)",
-        })[["Pitcher", "Stuff+", "Location+", "Risk-adj. WAR", "2025 salary ($M)", "Years of control",
+            "SurplusCurrentSeason_M": "2025 surplus ($M)", "PitchesThrown": "Pitches",
+        })[["Pitcher", "Pitches", "Stuff+", "Location+", "Sample", "Risk-adj. WAR", "2025 salary ($M)", "Years of control",
             "Multi-yr surplus ($M)", "2025 surplus ($M)"]].reset_index(drop=True)
+        reliability_for_column = {
+            "Stuff+": team_table["StuffReliability"].reset_index(drop=True),
+            "Location+": team_table["LocationReliability"].reset_index(drop=True),
+        }
 
         metric_for_column = {
             "Stuff+": "StuffPlus_Scaled", "Location+": "LocationPlus",
@@ -634,18 +764,20 @@ with tab_board:
         }
         cell_colors = pd.DataFrame(None, index=shown.index, columns=shown.columns, dtype=object)
         for col, metric in metric_for_column.items():
-            cell_colors[col] = [pools.color(metric, v) for v in shown[col]]
+            rel = reliability_for_column.get(col, pd.Series(1.0, index=shown.index))
+            cell_colors[col] = [pools.color(metric, v, r) for v, r in zip(shown[col], rel)]
         st.dataframe(
             colored_numbers(shown, cell_colors, {
-                "Stuff+": "{:.1f}", "Location+": "{:.1f}", "Risk-adj. WAR": "{:.2f}",
+                "Pitches": "{:,.0f}", "Stuff+": "{:.0f}", "Location+": "{:.0f}", "Risk-adj. WAR": "{:.2f}",
                 "2025 salary ($M)": "{:.2f}", "Years of control": "{:.0f}",
                 "Multi-yr surplus ($M)": "{:.1f}", "2025 surplus ($M)": "{:.1f}",
             }),
             width='stretch', hide_index=True,
         )
+        st.caption("Stuff+ / Location+ are regressed toward 100 by sample size; faded color = less reliable.")
         ungraded = team_table["RiskAdjWAR"].isna().sum()
         if ungraded:
-            st.caption(f"{ungraded} pitcher(s) are under config.MIN_PITCHES_FOR_INCLUSION pitches and have no value row.")
+            st.caption(f"{ungraded} pitcher(s) threw under {MIN_PITCHES_TO_DISPLAY} pitches and show n/a.")
 
         st.markdown("**Stuff+ vs. Location+**")
         st.plotly_chart(stuff_location_scatter(team_table.rename(columns={

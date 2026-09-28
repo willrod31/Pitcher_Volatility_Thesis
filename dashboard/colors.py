@@ -6,6 +6,11 @@ average) / gray -> blue (worse) scale, from its z-score against the
 LEAGUE-WIDE qualified pool. Red/blue instead of green/red so it reads for
 red-green colorblind viewers. Color is never the only cue: the number (and
 percentile where shown) is always printed next to it.
+
+Small samples: shown values are regressed toward league average, and the
+color's z is multiplied by the value's Reliability (n / (n + k)), so a
+low-sample number stays closer to gray. League mean/SD/percentile pools come
+from QUALIFIED pitchers only (the report's Qualified column).
 """
 import numpy as np
 import pandas as pd
@@ -17,6 +22,7 @@ NEUTRAL_COLOR = "#BFBFBF"   # z = 0 (league average)
 NEUTRAL_TEXT_LIGHT = "#7A7A7A"
 BAD_COLOR = "#3661AD"       # z = -2 (worse than league average)
 Z_CLIP = 2.0                # one extreme pitcher shouldn't wash out everyone else
+SMALL_SAMPLE_RELIABILITY = 0.5  # below this a value gets a "small" tag
 TINT_ALPHA = 0.30           # default alpha for rgba() fills
 
 # Metrics on the 100 + 10z scale: league mean 100, SD 10 by construction.
@@ -58,14 +64,15 @@ def _rgb_to_hex(rgb) -> str:
     return "#" + "".join(f"{int(round(c)):02X}" for c in rgb)
 
 
-def stat_z(value, league_mean, league_sd, higher_is_better: bool) -> float | None:
-    """z vs. the league pool, sign-flipped so positive = good, clipped to +/- Z_CLIP."""
+def stat_z(value, league_mean, league_sd, higher_is_better: bool, reliability=1.0) -> float | None:
+    """z vs. the league pool, sign-flipped so positive = good, clipped to +/- Z_CLIP, times reliability (fade)."""
     if value is None or pd.isna(value) or not league_sd or pd.isna(league_sd):
         return None
     z = (value - league_mean) / league_sd
     if not higher_is_better:
         z = -z
-    return float(np.clip(z, -Z_CLIP, Z_CLIP))
+    weight = 1.0 if reliability is None or pd.isna(reliability) else float(np.clip(reliability, 0, 1))
+    return float(np.clip(z, -Z_CLIP, Z_CLIP)) * weight
 
 
 def z_color(z: float | None, neutral: str = NEUTRAL_COLOR) -> str | None:
@@ -77,9 +84,18 @@ def z_color(z: float | None, neutral: str = NEUTRAL_COLOR) -> str | None:
     return _rgb_to_hex((1 - t) * _hex_to_rgb(neutral) + t * _hex_to_rgb(end))
 
 
-def stat_color(value, league_mean, league_sd, higher_is_better: bool, neutral: str = NEUTRAL_COLOR) -> str | None:
-    """Hex color for a value, or None (no color) when it's missing."""
-    return z_color(stat_z(value, league_mean, league_sd, higher_is_better), neutral)
+def stat_color(value, league_mean, league_sd, higher_is_better: bool, neutral: str = NEUTRAL_COLOR, reliability=1.0) -> str | None:
+    """Hex color for a value, or None (no color) when it's missing. Intensity scaled by reliability."""
+    return z_color(stat_z(value, league_mean, league_sd, higher_is_better, reliability), neutral)
+
+
+def base_metric(metric: str) -> str:
+    """"LocationPlus_Reg" -> "LocationPlus": regressed values are graded on the raw metric's pool."""
+    return metric[:-4] if metric.endswith("_Reg") else metric
+
+
+def is_small_sample(reliability) -> bool:
+    return reliability is not None and pd.notna(reliability) and reliability < SMALL_SAMPLE_RELIABILITY
 
 
 def rgba(color: str | None, alpha: float = TINT_ALPHA) -> str:
@@ -112,35 +128,50 @@ class LeaguePools:
         self.neutral = neutral  # league-average color (NEUTRAL_TEXT_LIGHT for numbers on the light theme)
 
     def pool(self, metric: str) -> pd.Series:
+        """Raw values of the qualified pitchers (the *_Reg suffix is dropped)."""
+        metric = base_metric(metric)
         if self.report is None or metric not in self.report:
             return pd.Series(dtype=float)
-        return self.report[metric].dropna()
+        rows = self.report[self.report["Qualified"].astype(bool)] if "Qualified" in self.report else self.report
+        return rows[metric].dropna()
 
     def mean_sd(self, metric: str) -> tuple[float, float]:
-        if metric in SCALED_METRICS:
+        if base_metric(metric) in SCALED_METRICS:
             return 100.0, 10.0
         pool = self.pool(metric)
         return (pool.mean(), pool.std()) if len(pool) >= 2 else (np.nan, np.nan)
 
-    def color(self, metric: str, value) -> str | None:
+    def color(self, metric: str, value, reliability=1.0) -> str | None:
         mean, sd = self.mean_sd(metric)
-        return stat_color(value, mean, sd, METRIC_DIRECTION[metric], self.neutral)
+        return stat_color(value, mean, sd, METRIC_DIRECTION[base_metric(metric)], self.neutral, reliability)
 
-    def z(self, metric: str, value) -> float | None:
+    def z(self, metric: str, value, reliability=1.0) -> float | None:
         mean, sd = self.mean_sd(metric)
-        return stat_z(value, mean, sd, METRIC_DIRECTION[metric])
+        return stat_z(value, mean, sd, METRIC_DIRECTION[base_metric(metric)], reliability)
 
     def percentile(self, metric: str, value) -> float | None:
-        return league_percentile(value, self.pool(metric), METRIC_DIRECTION[metric])
+        return league_percentile(value, self.pool(metric), METRIC_DIRECTION[base_metric(metric)])
 
 
-def stat_html(label: str, value_text: str, color: str | None, percentile: float | None) -> str:
-    """Stat card: label, the number in its good/bad color, league percentile underneath."""
+SMALL_SAMPLE_TAG = (
+    '<span style="font-size:0.7rem;font-weight:600;padding:1px 6px;margin-left:6px;border-radius:8px;'
+    'border:1px solid currentColor;opacity:0.7;vertical-align:middle;">small</span>'
+)
+
+
+def stat_html(label: str, value_text: str, color: str | None, percentile: float | None,
+              sample_text: str | None = None, hover: str | None = None, small_sample: bool = False) -> str:
+    """Stat card: label, the number in its good/bad color (+ sample size), league percentile underneath.
+
+    hover: tooltip text (e.g. the raw, unregressed value). small_sample adds the "small" tag.
+    """
     pct = f"{ordinal(percentile)} pct" if percentile is not None else "&nbsp;"
+    sample = f'<span style="font-size:0.85rem;font-weight:400;opacity:0.7;"> ({sample_text})</span>' if sample_text else ""
+    title = f' title="{hover}"' if hover else ""
     return (
-        '<div style="padding:4px 0 10px 0;">'
-        f'<div style="font-size:0.85rem;opacity:0.75;">{label}</div>'
-        f'<div style="font-size:2rem;font-weight:700;color:{color or "inherit"};">{value_text}</div>'
+        f'<div style="padding:4px 0 10px 0;"{title}>'
+        f'<div style="font-size:0.85rem;opacity:0.75;">{label}{SMALL_SAMPLE_TAG if small_sample else ""}</div>'
+        f'<div style="font-size:2rem;font-weight:700;color:{color or "inherit"};">{value_text}{sample}</div>'
         f'<div style="font-size:0.75rem;opacity:0.7;">{pct}</div>'
         "</div>"
     )
@@ -156,6 +187,7 @@ def legend_html() -> str:
         "<span>Worse than league average</span><span>League average</span>"
         "<span>Better than league average</span></div>"
         '<div style="opacity:0.7;">Compared to all qualified MLB pitchers.</div>'
+        '<div style="opacity:0.7;">Small samples are pulled toward league average until they are reliable.</div>'
         "</div>"
     )
 

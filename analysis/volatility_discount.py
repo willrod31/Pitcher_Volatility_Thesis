@@ -11,6 +11,14 @@ pitches) are measured start to start; everyone else is measured appearance
 to appearance (15+ appearances of 10+ pitches), so relievers get a real
 score instead of defaulting to the 50th percentile downstream.
 
+Small samples: pitchers who qualify for neither path but threw
+config.MIN_PITCHES_TO_DISPLAY+ pitches get a score too, from whichever unit
+they have more of, labeled Qualified = False (see assign_small_sample_path).
+Their z-scores use the QUALIFIED path pool's mean/SD, so they don't move
+anyone else's grade. VolatilityScore_Reg = (n * score + k * pool mean) / (n + k)
+with n = appearances and k per path from analysis/stabilization.py;
+VolatilityPercentile(_Reg) = share of the qualified path pool at or below it.
+
 Graded league-wide (loaded one month at a time via load_season_monthly(),
 since a single full-season pull OOMs on an 8GB machine); --team only
 filters the printed output.
@@ -24,13 +32,15 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
-from config import END_DATE, SEASON, START_DATE
+from config import END_DATE, MIN_PITCHES_TO_DISPLAY, SEASON, START_DATE
 from analysis.data_acquisition import filter_to_team
-from analysis.data_acquisition import load_season_monthly, primary_team
+from analysis.data_acquisition import load_season_monthly
 from analysis.injury_history import STINTS_PATH, SUMMARY_PATH
-from analysis.utils import CACHE_DIR, percentile_rank, zscore
+from analysis.stabilization import load_k, regress, reliability
+from analysis.utils import CACHE_DIR, pct_vs_pool, zscore_vs
 
 OUT_PATH = CACHE_DIR / "volatility_discount.parquet"
+APPEARANCES_PATH = CACHE_DIR / "volatility_appearances.parquet"   # one row per pitcher x game (cached)
 
 # Only what this module uses -- keeps the league-wide 6-month frame small
 # (see data_acquisition.load_season_monthly).
@@ -47,6 +57,7 @@ MIN_STARTS = 8                # need enough starts for variance to mean anything
 # Reliever path: one unit = one appearance, for pitchers without MIN_STARTS starts
 MIN_PITCHES_PER_RELIEF = 10
 MIN_RELIEF_APPEARANCES = 15
+MIN_UNITS_FOR_SCORE = 2       # small-sample path: fewest units a raw score (an SD) can be computed from
 TRAILING_MIN_STARTS = 3       # min prior appearances before trailing volatility is computed
 IL_WINDOW_DAYS = 30           # "went on the IL soon after this start" window
 
@@ -74,6 +85,26 @@ def build_appearance_level(df: pd.DataFrame) -> pd.DataFrame:
     return apps.sort_values(["PitcherId", "game_date"])
 
 
+def build_appearances(force_refresh: bool = False) -> pd.DataFrame:
+    """League-wide appearance table (plus Pitcher name), cached -- also read by analysis/stabilization.py."""
+    if APPEARANCES_PATH.exists() and not force_refresh:
+        return pd.read_parquet(APPEARANCES_PATH)
+    print(f"Loading league-wide Statcast {START_DATE} to {END_DATE} (month by month)...")
+    df = load_season_monthly(START_DATE, END_DATE, columns=RAW_COLUMNS, force_refresh=force_refresh)
+    name_by_id = df.drop_duplicates("pitcher").set_index("pitcher")["Pitcher"]
+    apps = build_appearance_level(df)
+    del df
+    apps.insert(1, "Pitcher", apps["PitcherId"].map(name_by_id))
+    apps.to_parquet(APPEARANCES_PATH, index=False)
+    return apps
+
+
+def primary_team_from_apps(apps: pd.DataFrame) -> pd.Series:
+    """PitcherTeam each pitcher threw the most pitches for (same rule as data_acquisition.primary_team)."""
+    counts = apps.groupby(["PitcherId", "PitcherTeam"])["Pitches"].sum().rename("n").reset_index()
+    return counts.sort_values("n", ascending=False).drop_duplicates("PitcherId").set_index("PitcherId")["PitcherTeam"]
+
+
 def assign_volatility_path(apps: pd.DataFrame) -> pd.DataFrame:
     """Pick each pitcher's unit of volatility and keep only those appearances.
 
@@ -97,15 +128,51 @@ def assign_volatility_path(apps: pd.DataFrame) -> pd.DataFrame:
     return units.sort_values(["PitcherId", "game_date"])
 
 
-def compute_season_volatility(units: pd.DataFrame, team_by_id: pd.Series) -> pd.DataFrame:
+def assign_small_sample_path(apps: pd.DataFrame, qualified_ids) -> pd.DataFrame:
+    """Units for pitchers outside both qualified paths (but MIN_PITCHES_TO_DISPLAY+ pitches).
+
+    Path = whichever unit they have more of (starts of MIN_PITCHES_PER_START+
+    vs. relief appearances of MIN_PITCHES_PER_RELIEF+; ties go to reliever).
+    If that path has fewer than MIN_UNITS_FOR_SCORE units, all of the
+    pitcher's appearances with MIN_PITCHES_PER_RELIEF+ pitches are used
+    instead (e.g. 1 start + 2 long relief outings). Pitchers still under
+    MIN_UNITS_FOR_SCORE get no raw score, and their regressed score is the
+    pool mean (reliability ~0) -- see compute_season_volatility.
+    """
+    apps = apps[~apps["PitcherId"].isin(qualified_ids)]
+    total = apps.groupby("PitcherId")["Pitches"].sum()
+    apps = apps[apps["PitcherId"].isin(total[total >= MIN_PITCHES_TO_DISPLAY].index)]
+    starts = apps[apps["Started"] & (apps["Pitches"] >= MIN_PITCHES_PER_START)]
+    relief = apps[~apps["Started"] & (apps["Pitches"] >= MIN_PITCHES_PER_RELIEF)]
+    n_starts = starts.groupby("PitcherId").size().reindex(total.index, fill_value=0)
+    n_relief = relief.groupby("PitcherId").size().reindex(total.index, fill_value=0)
+    path = pd.Series(np.where(n_starts > n_relief, "starter", "reliever"), index=total.index)
+    path_units = np.where(path == "starter", n_starts, n_relief)
+    short = set(total.index[path_units < MIN_UNITS_FOR_SCORE])
+    any_app = apps[apps["Pitches"] >= MIN_PITCHES_PER_RELIEF]
+    units = pd.concat([
+        starts[starts["PitcherId"].isin(path[path == "starter"].index.difference(short))],
+        relief[relief["PitcherId"].isin(path[path == "reliever"].index.difference(short))],
+        any_app[any_app["PitcherId"].isin(short)],
+    ], ignore_index=True)
+    units["VolatilityPath"] = units["PitcherId"].map(path)
+    return units.sort_values(["PitcherId", "game_date"])
+
+
+def compute_season_volatility(units: pd.DataFrame, team_by_id: pd.Series, small_units: pd.DataFrame | None = None) -> pd.DataFrame:
     """Season-long outing-to-outing volatility -- the number the dashboard shows.
 
     Z-scores/percentiles are computed within each path (starters vs. starters,
     relievers vs. relievers), league-wide: per-appearance means over ~15
     reliever pitches are noisier than over ~90 starter pitches, so pooling
-    them would rank nearly every reliever as "volatile".
+    them would rank nearly every reliever as "volatile". The mean/SD and
+    percentile pool are the QUALIFIED pitchers in `units` only;
+    `small_units` pitchers are graded against that pool.
     """
+    units = pd.concat([units.assign(Qualified=True), (small_units if small_units is not None else units.iloc[:0]).assign(Qualified=False)],
+                      ignore_index=True)
     per_pitcher = units.groupby("PitcherId").agg(
+        Qualified=("Qualified", "first"),
         VolatilityPath=("VolatilityPath", "first"),
         Appearances=("game_pk", "size"),
         VeloVolatility=("MeanVelo", "std"),
@@ -117,11 +184,19 @@ def compute_season_volatility(units: pd.DataFrame, team_by_id: pd.Series) -> pd.
     per_pitcher["ReleaseVolatility"] = np.sqrt(
         per_pitcher["RelXVolatility"] ** 2 + per_pitcher["RelZVolatility"] ** 2
     )
-    by_path = per_pitcher.groupby("VolatilityPath")
-    per_pitcher["VolatilityScore"] = (
-        by_path["VeloVolatility"].transform(zscore) + by_path["ReleaseVolatility"].transform(zscore)
-    )
-    per_pitcher["VolatilityPercentile"] = by_path["VolatilityScore"].transform(percentile_rank).round(1)
+    for path, rows in per_pitcher.groupby("VolatilityPath"):
+        pool = rows[rows["Qualified"]]
+        score = (zscore_vs(rows["VeloVolatility"], pool["VeloVolatility"])
+                 + zscore_vs(rows["ReleaseVolatility"], pool["ReleaseVolatility"]))
+        pool_score = score[rows["Qualified"]]
+        k = load_k(f"VolatilityScore[{path}]")
+        # under MIN_UNITS_FOR_SCORE appearances there's no SD, so no raw score: regressed = pool mean
+        reg = regress(score.fillna(pool_score.mean()), rows["Appearances"], k, pool_score.mean())
+        per_pitcher.loc[rows.index, "VolatilityScore"] = score
+        per_pitcher.loc[rows.index, "VolatilityScore_Reg"] = reg
+        per_pitcher.loc[rows.index, "VolatilityReliability"] = reliability(rows["Appearances"], k).round(3)
+        per_pitcher.loc[rows.index, "VolatilityPercentile"] = pct_vs_pool(score, pool_score).round(1)
+        per_pitcher.loc[rows.index, "VolatilityPercentile_Reg"] = pct_vs_pool(reg, pool_score).round(1)
     return per_pitcher
 
 
@@ -248,22 +323,20 @@ def run_injury_regression(starts_with_outcomes: pd.DataFrame):
 
 
 def run(team: str | None = None, force_refresh: bool = False):
-    print(f"Loading league-wide Statcast {START_DATE} to {END_DATE} (month by month)...")
-    df = load_season_monthly(START_DATE, END_DATE, columns=RAW_COLUMNS, force_refresh=force_refresh)
-    team_by_id = primary_team(df)
-    name_by_id = df.drop_duplicates("pitcher").set_index("pitcher")["Pitcher"]
+    apps = build_appearances(force_refresh=force_refresh)
+    team_by_id = primary_team_from_apps(apps)
+    name_by_id = apps.drop_duplicates("PitcherId").set_index("PitcherId")["Pitcher"]
 
-    apps = build_appearance_level(df)
-    del df
     units = assign_volatility_path(apps)
+    small_units = assign_small_sample_path(apps, units["PitcherId"].unique())
 
-    season_volatility = compute_season_volatility(units, team_by_id)
+    season_volatility = compute_season_volatility(units, team_by_id, small_units)
     season_volatility.insert(1, "Pitcher", season_volatility["PitcherId"].map(name_by_id))
     season_volatility = attach_injury_history(season_volatility)
     # Always save the league-wide table; --team only filters what's printed.
     season_volatility.to_parquet(OUT_PATH, index=False)
     print(f"Saved {len(season_volatility)} league-wide rows to {OUT_PATH}")
-    print(season_volatility["VolatilityPath"].value_counts().to_string())
+    print(season_volatility.groupby(["VolatilityPath", "Qualified"]).size().to_string())
 
     if team:
         shown = filter_to_team(season_volatility, team).sort_values("VolatilityPercentile", ascending=False)
