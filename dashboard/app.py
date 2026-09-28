@@ -567,7 +567,7 @@ with tab_report:
                 pitcher_location_rows.set_index("PitchType")["LocationPlus"]
                 if pitcher_location_rows is not None and not pitcher_location_rows.empty else np.nan
             )
-            arsenal = arsenal.loc[pitch_order(arsenal.index)]
+            arsenal = arsenal.sort_values(["Usage", "Pitches"], ascending=False)
             arsenal.insert(0, "Pitch", [PITCH_TYPE_NAMES.get(p, p) for p in arsenal.index])
             arsenal = arsenal.rename(columns={"Velo": "Velo (mph)", "HB": "HB (in, arm side +)", "IVB": "IVB (in)"})
 
