@@ -5,7 +5,6 @@ venv/
 data/*.parquet
 data/*.csv
 data/*.json
-dashboard/data/*.csv
 .ipynb_checkpoints/
 .DS_Store
 .env

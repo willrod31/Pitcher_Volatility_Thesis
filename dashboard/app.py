@@ -525,7 +525,7 @@ tab_report, tab_board = st.tabs(["Pitcher Report", "Team Value Board"])
 with tab_report:
     if pitcher_choice is None:
         st.subheader(f"{team_name_choice} ({team_choice})")
-        st.info(f"No pitcher on the {team_name_choice} has Stuff+ data loaded yet. Pick a team with data loaded (e.g. Pittsburgh Pirates) from the sidebar.")
+        st.info(f"No data loaded for this team yet ({team_name_choice}). Pick a team with data loaded (e.g. Pittsburgh Pirates) from the sidebar.")
     else:
         pitcher_id = int(stuff_plus_summary.loc[stuff_plus_summary["Pitcher"] == pitcher_choice, "PitcherId"].iloc[0])
 
@@ -716,7 +716,7 @@ with tab_board:
     st.markdown(legend_html(), unsafe_allow_html=True)
 
     if not team_pitchers:
-        st.caption("No pitchers loaded for this team yet.")
+        st.info("No data loaded for this team yet.")
     elif report_data is None:
         st.caption(
             "No value data yet -- run asymmetric_upside, volatility_discount, "
