@@ -20,7 +20,7 @@ Stuff+ and Location+ are proprietary (FanGraphs/PitcherList), not available via 
 
 pitcher-volatility-thesis/
 ├── README.md
-├── requirements.txt
+├── requirements.txt             # analysis scripts (includes dashboard/requirements.txt)
 ├── config.py                    # season, thresholds, constants
 ├── data/                        # cached Statcast pulls + each script's output (gitignored)
 ├── notebooks/
@@ -39,7 +39,8 @@ pitcher-volatility-thesis/
 │   └── utils.py
 └── dashboard/
     ├── app.py                   # Streamlit dashboard
-    └── data/                    # exports the analysis scripts hand off to app.py (gitignored)
+    ├── requirements.txt         # dashboard-only deps (what Streamlit Cloud installs)
+    └── data/                    # exports the analysis scripts hand off to app.py (committed; the deployed app reads these)
         ├── stuff_plus_pitch_types.csv   # from stuff_plus_proxy.py --pitcher
         ├── stuff_plus_pitches.csv       # from stuff_plus_proxy.py --pitcher (scored swings, with per-pitch StuffPlus)
         ├── movement_pitches.csv         # from stuff_plus_proxy.py --pitcher/--team (every pitch + arm angle, for the movement chart)
@@ -86,7 +87,10 @@ export_report_data.py — joins all four scripts' output into the one CSV the da
 
 ## Setup
 
-pip install -r dashboard/requirements.txt
+Requires Python 3.10+ (the code uses `X | None` type hints). On Streamlit Community Cloud, pick Python 3.10 or newer under Advanced settings when deploying.
+
+pip install -r requirements.txt              # analysis scripts + dashboard
+pip install -r dashboard/requirements.txt    # dashboard only
 
 ## Stuff+ Proxy: real-data demo
 
@@ -195,6 +199,14 @@ Location+ is the command counterpart to Stuff+: Stuff+ sees only pitch shape, Lo
 ## Dashboard
 
 streamlit run dashboard/app.py
+
+### Updating the deployed dashboard
+
+The public app on Streamlit Community Cloud runs from GitHub and only sees committed files. It reads nothing from data/ (gitignored raw caches), only the CSVs in dashboard/data/.
+
+1. Rerun the analysis scripts locally (run order above, ending with `python -m analysis.export_report_data`).
+2. Commit the updated files: `git add dashboard/data/ && git commit -m "Refresh dashboard data"`.
+3. Push. Streamlit Cloud redeploys automatically.
 
 The Pitcher Report has a fastball velocity by appearance chart: average primary-fastball velocity per game (FF, else SI, else FC), a dashed season average, a ±1 SD band, and IL stints from injury_stints.csv shaded. The pitch arsenal table, the Stuff+/Location+ bar chart and the pitch type key are all ordered by usage (most used first).
 
