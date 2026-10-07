@@ -34,13 +34,13 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from config import END_DATE, MIN_PITCHES_TO_DISPLAY, SEASON, START_DATE
 from analysis.data_acquisition import filter_to_team
-from analysis.data_acquisition import load_season_monthly
+from analysis.data_acquisition import load_season_monthly, pitchers_only
 from analysis.injury_history import STINTS_PATH, SUMMARY_PATH
 from analysis.stabilization import load_k, regress, reliability
-from analysis.utils import CACHE_DIR, pct_vs_pool, zscore_vs
+from analysis.utils import RESULTS_DIR, pct_vs_pool, zscore_vs
 
-OUT_PATH = CACHE_DIR / "volatility_discount.parquet"
-APPEARANCES_PATH = CACHE_DIR / "volatility_appearances.parquet"   # one row per pitcher x game (cached)
+OUT_PATH = RESULTS_DIR / "volatility_discount.parquet"
+APPEARANCES_PATH = RESULTS_DIR / "volatility_appearances.parquet"   # one row per pitcher x game (cached)
 
 # Only what this module uses -- keeps the league-wide 6-month frame small
 # (see data_acquisition.load_season_monthly).
@@ -88,7 +88,8 @@ def build_appearance_level(df: pd.DataFrame) -> pd.DataFrame:
 def build_appearances(force_refresh: bool = False) -> pd.DataFrame:
     """League-wide appearance table (plus Pitcher name), cached -- also read by analysis/stabilization.py."""
     if APPEARANCES_PATH.exists() and not force_refresh:
-        return pd.read_parquet(APPEARANCES_PATH)
+        # pitchers_only: the cache may predate the position filter
+        return pitchers_only(pd.read_parquet(APPEARANCES_PATH), "PitcherId")
     print(f"Loading league-wide Statcast {START_DATE} to {END_DATE} (month by month)...")
     df = load_season_monthly(START_DATE, END_DATE, columns=RAW_COLUMNS, force_refresh=force_refresh)
     name_by_id = df.drop_duplicates("pitcher").set_index("pitcher")["Pitcher"]

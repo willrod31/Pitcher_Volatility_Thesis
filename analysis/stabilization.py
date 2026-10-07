@@ -41,10 +41,10 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
 
-from analysis.utils import CACHE_DIR
+from analysis.utils import RESULTS_DIR
 from config import MIN_PITCHES_FOR_INCLUSION
 
-STABILIZATION_PATH = CACHE_DIR / "stabilization.csv"
+STABILIZATION_PATH = RESULTS_DIR / "stabilization.csv"
 
 PITCH_GRID = [25, 50, 100, 200, 400]
 PA_GRID = [25, 50, 100, 200]

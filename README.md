@@ -22,7 +22,7 @@ pitcher-volatility-thesis/
 ├── README.md
 ├── requirements.txt             # analysis scripts (includes dashboard/requirements.txt)
 ├── config.py                    # season, thresholds, constants
-├── data/                        # cached Statcast pulls + each script's output (gitignored)
+├── data/                        # salaries.csv + report on top; raw/ caches and results/ outputs (gitignored; see data/README.md)
 ├── notebooks/
 │   └── 01_exploratory.ipynb     # scratch space for exploring data before it becomes a script
 ├── analysis/
@@ -67,7 +67,7 @@ asymmetric_upside.py, volatility_discount.py and risk_adjusted_value.py always g
 
     python -m analysis.injury_history --team PIT
     python -m analysis.contract_status --team PIT
-    python -m analysis.stabilization              # builds/uses the cached league scores; writes data/stabilization.csv
+    python -m analysis.stabilization              # builds/uses the cached league scores; writes data/results/stabilization.csv
     python -m analysis.stuff_plus_proxy --team PIT
     python -m analysis.location_plus_proxy --team PIT
     python -m analysis.asymmetric_upside --team PIT
@@ -82,7 +82,7 @@ asymmetric_upside.py, volatility_discount.py and risk_adjusted_value.py always g
 
 run_all.py runs the same modules for every team but trains and grades the league only once:
 
-1. Each team's roster cache (data/statcast_team_<TEAM>_*.parquet) is split out of the cached league monthly pulls instead of one Statcast pull per team (identical to the per-team pull; checked on PIT).
+1. Each team's roster cache (data/raw/statcast/teams/statcast_team_<TEAM>_*.parquet) is split out of the cached league monthly pulls instead of one Statcast pull per team (identical to the per-team pull; checked on PIT).
 2. injury_history and contract_status run for every team first, since volatility and risk-adjusted value use every team's IL history.
 3. The league season is loaded month by month once (peak ~1.2GB on the PIT test, fine on 8GB) and shared by Stuff+, the Stuff+ dashboard exports and asymmetric_upside. Stuff+ and Location+ reuse their cached out-of-fold scores, then upside, volatility and risk-adjusted value are graded league-wide.
 4. Per team: each module's team view and the Stuff+ dashboard exports. Each roster pitcher's full season (any team) is taken from the shared league frame by PitcherId, not pulled by name.
@@ -92,26 +92,28 @@ Each team's console output goes to logs/run_<TEAM>.txt and the league steps to l
 
 A traded pitcher is listed under every team he pitched for in stuff_plus_pitch_types.csv (keyed on PitcherId x PitcherTeam), graded on his whole season under each.
 
+### Contract rules
+
+risk_adjusted_value.resolve_contracts() and the missing-contract report use the same rules:
+
+- **Pitchers only.** Every pitcher id's primary position comes from the MLB Stats API /people endpoint (cached in data/player_positions.csv). Anyone whose primary position isn't pitcher ("1") or two-way ("Y") is dropped from the league frame before grading, from team rosters, from every dashboard file and from the report (position players who threw mop-up innings). None of them had 500 pitches, so the qualified grading pool doesn't change. The cached Stuff+/Location+ out-of-fold models were trained before the filter, so their few hundred mop-up pitches were in the training folds; `--refresh` retrains without them. run_all prints the excluded players.
+- **Duplicates (traded pitchers).** salaries.csv has one row per team. load_salaries() keeps the row with the largest Salary, his full 2025 contract rather than a prorated release or minimum row (e.g. Walker Buehler at $18.05M, not $69,462), and ContractStatus, YearsControl and GuaranteedFuture come from that same row. On a tie it keeps the row with more contract fields filled in, then the later row (Bednar's PIT row with his 2026 guarantee, Wentz's hand-checked PIT row). What each team actually paid (TeamPaid2025) is kept per team by load_team_paid() and exported to dashboard/data/team_paid_2025.csv. The pitcher report shows "PIT paid $X of his $Y 2025 salary". Conflicts are printed on every run with the Salary chosen.
+- **salaries.csv wins.** When a pitcher has a salaries.csv row, its Salary, ContractStatus and YearsControl are used. Blank control fields fall back to the debut-date estimate.
+- **Pre-arb, not in salaries.csv.** League minimum (config.LEAGUE_MIN_SALARY_BY_YEAR), estimated years of control. SalarySource = "Pre-arb: league minimum (debut-date estimate)".
+- **Default for everyone else not in salaries.csv.** Not pre-arb by the debut-date estimate: Salary = league minimum, YearsControl = 1, ContractStatus = "FA", SalarySource = "Default: league minimum (not in salaries.csv)" (ContractEstimated = True). The dashboard tags these values "est. contract". Same-name players are kept apart by id: Luis F. Castillo (622379) is on the default, while Seattle's Luis Castillo (622491) has a salaries.csv row.
+- **Status mismatch** is only flagged when the status came from the debut-date estimate: the estimate says arb, but the default assumed FA. A salaries.csv status is never flagged. EstimateDisagrees in data/results/risk_adjusted_value.parquet keeps the old salaries.csv-vs-estimate comparison for reference.
+- **Two-way players** (config.TWO_WAY_EXCLUDE_VALUE = [660271], Shohei Ohtani) keep their pitching metrics (Stuff+, Location+, volatility, injury), but no salary or surplus is computed, because his salary pays for hitting and pitching. The dashboard shows "Two-way player: contract not valued" instead of the value numbers.
+
 ### Missing-contract report
 
-run_all.py writes data/missing_contract_report.csv: one row per pitcher x 2025 team shown in the dashboard whose contract data has a gap:
+run_all.py writes data/missing_contract_report.csv: one row per pitcher x 2025 team shown in the dashboard who is on the default contract or still can't be valued.
 
-- `no salary`: no Salary after all fallbacks (not in salaries.csv and not estimated pre-arb), so there's no surplus value.
-- `missing (1 yr assumed)`: no YearsControl in salaries.csv, and the debut-date estimate gives 0 years or none (usually veterans not in salaries.csv).
-- `status mismatch`: the salaries.csv ContractStatus disagrees with the debut-date estimate. Often the estimate is the one that's wrong (see contract_status.py), so this is a list to double-check, not a list of errors.
+Columns: PitcherId, Pitcher, Team, Problem, Fix, ContractStatus_est, EstYearsControl, Pitches2025 (cleaned Statcast pitches, all teams). Sorted by Pitches2025, so the gaps that matter most come first.
 
-Columns: PitcherId, Pitcher, Team, Problem (several are joined with "; "), ContractStatus_est, EstYearsControl, Pitches2025 (cleaned Statcast pitches, all teams). Sorted by Pitches2025, so the gaps that matter most come first. The run also prints per-team counts of each problem, and how many pitchers per team got their 2025 Salary from salaries.csv vs. the league-minimum default. Fix gaps by adding rows to data/salaries.csv and re-running.
+- Problem: `not in salaries.csv` (on the default contract), `status mismatch (estimate says arb, defaulted to FA)`, `no salary (not in salaries.csv, no debut date)`, `missing (1 yr assumed)`. Several are joined with "; ".
+- Fix: `default min` = valued on the default contract; add a salaries.csv row to replace it. `needs data` = nothing to value him on (no salaries.csv row and no debut date) or no years of control.
 
-injury_history.py — IL history. Pulls each pitcher's transactions from the MLB Stats API and builds one row per IL stint (data/injury_stints.csv) and one per pitcher (data/injury_summary.csv). volatility_discount.py joins the summary and also tests whether volatility predicts an IL stint in the next 30 days.
-
-    python -m analysis.injury_history --pitcher "Paul Skenes"
-    python -m analysis.injury_history --team PIT
-
-contract_status.py — estimates ContractStatus (pre-arb / arb / FA-eligible) and years of control from each pitcher's mlbDebutDate (MLB Stats API /people), writes data/contract_status_est.csv, and flags pitchers where the estimate disagrees with data/salaries.csv. EstServiceYears is SEASON minus debut year -- an approximation that ignores option years, IL, partial seasons and Super Two.
-
-risk_adjusted_value.py — Risk-Adjusted Value Projection. Combines the upside index, volatility metric and IL history into a projected WAR proxy, shrunk toward replacement level as volatility and injury risk increase. Joins data/salaries.csv on PitcherId (blank contract fields fall back to contract_status.py's estimate; blank pre-arb salaries get the league minimum). Ranks pitchers by MultiYearSurplus: discounted surplus over each remaining year of team control (year-by-year table in data/surplus_by_year.csv). SurplusCurrentSeason keeps the old single-season number for comparison.
-
-export_report_data.py — joins all four scripts' output into the one CSV the dashboard reads.
+The run prints per team how many pitchers got their 2025 contract from salaries.csv, the pre-arb minimum or the default minimum, plus needs-data rows, two-way players and excluded non-pitchers. It also prints every "needs data" row and the top 20 default-contract pitchers by 2025 pitches.
 
 ## Setup
 
@@ -156,7 +158,7 @@ Three changes to how Stuff+ is trained and scored. The original numbers are kept
 - **Score every pitch.** The model is still trained on swings (P(whiff | swing, shape)), but every pitch of that type is scored, roughly doubling each pitcher's sample. Rows carry Pitches (scored) and Swings.
 - **Out-of-fold.** 5-fold GroupKFold by pitcher: a pitcher's own pitches never train the model that grades him (same as Location+). The 100 in the ratio StuffPlus is the league's average predicted whiff probability for that pitch type over every pitch. StuffPlus_Scaled = 100 + 10 z vs. the same qualified pool as before.
 
-Out-of-fold validation (data/stuff_plus_validation.csv; held-out pitchers' swings; baseline = always predict the training folds' whiff rate):
+Out-of-fold validation (data/results/stuff_plus/stuff_plus_validation.csv; held-out pitchers' swings; baseline = always predict the training folds' whiff rate):
 
 | Pitch | Swings | AUC | Log loss | Baseline log loss |
 |---|---|---|---|---|
@@ -174,13 +176,13 @@ Out-of-fold validation (data/stuff_plus_validation.csv; held-out pitchers' swing
 
 Honest reading: AUC is above 0.5 for every pitch type, so shape carries *some* ranking signal about whiffs on pitchers the model has never seen, but it is weak (0.51 to 0.59). Log loss only beats the constant baseline for FF, SL and CU; for the rest the probabilities are over-confident on new pitchers (worst: SI, SV, CS). Single-swing whiffs depend heavily on location, count and the batter, none of which are features here. Stuff+ is therefore best read as a relative ranking of pitch shape, not a calibrated whiff probability. FO (1 pitcher) and KN are not scored, since GroupKFold needs 5+ pitchers.
 
-v1 vs. v2 (qualified pitchers, data/stuff_plus_v1_comparison.csv): Pearson r = 0.43 overall, 0.40 RHP, 0.78 LHP. The RHP number is dominated by one outlier: Tyler Rogers (submarine release) goes from 100 to 280 scaled, because when he is held out no training pitcher has a release like his, so the out-of-fold model extrapolates. Excluding him, RHP r = 0.81 vs. LHP 0.78, and by rank (Spearman) LHP moved more (0.70 vs. 0.87). A diagnostic refit of v1 with *only* the mirroring change correlates 0.983 with v1 for RHP and 0.968 for LHP: mirroring moves lefties more, as expected, but most of the total change comes from out-of-fold, every-pitch scoring.
+v1 vs. v2 (qualified pitchers, data/results/stuff_plus/stuff_plus_v1_comparison.csv): Pearson r = 0.43 overall, 0.40 RHP, 0.78 LHP. The RHP number is dominated by one outlier: Tyler Rogers (submarine release) goes from 100 to 280 scaled, because when he is held out no training pitcher has a release like his, so the out-of-fold model extrapolates. Excluding him, RHP r = 0.81 vs. LHP 0.78, and by rank (Spearman) LHP moved more (0.70 vs. 0.87). A diagnostic refit of v1 with *only* the mirroring change correlates 0.983 with v1 for RHP and 0.968 for LHP: mirroring moves lefties more, as expected, but most of the total change comes from out-of-fold, every-pitch scoring.
 
 ## Small samples: stabilization and regression toward the mean
 
 Lowering MIN_PITCHES_FOR_INCLUSION would make an 80-pitch reliever look as certain as a 3,000-pitch starter. Instead every metric is regressed toward the qualified league mean by how much it can be trusted at that sample size.
 
-**Stabilization (analysis/stabilization.py, data/stabilization.csv).** For each metric and each sample size n, every qualified pitcher with at least 2n units gets two random, non-overlapping samples of n units; the metric is computed on each half and correlated across pitchers (5 random draws, averaged; a point needs 30+ pitchers). r(n) = n / (n + k) is then fit by least squares, so k is the sample size at which reliability = 0.5. Grids: 25/50/100/200/400 pitches, 25/50/100/200 PA, 5/10/15 appearances.
+**Stabilization (analysis/stabilization.py, data/results/stabilization.csv).** For each metric and each sample size n, every qualified pitcher with at least 2n units gets two random, non-overlapping samples of n units; the metric is computed on each half and correlated across pitchers (5 random draws, averaged; a point needs 30+ pitchers). r(n) = n / (n + k) is then fit by least squares, so k is the sample size at which reliability = 0.5. Grids: 25/50/100/200/400 pitches, 25/50/100/200 PA, 5/10/15 appearances.
 
 | Metric | Unit | k |
 |---|---|---|
@@ -220,7 +222,7 @@ Location+ is the command counterpart to Stuff+: Stuff+ sees only pitch shape, Lo
 - **Model:** one HistGradientBoostingRegressor per pitch group (Fastball FF/SI/FC, Breaking SL/ST/CU/KC/SV, Offspeed CH/FS/FO/SC), trained on every pitch league-wide (full config.py season, loaded month by month).
 - **Out-of-fold scoring:** 5-fold GroupKFold by pitcher, so a pitcher's own pitches never train the model that scores him. Fold R^2 is low (~0.06) because single-pitch run value is mostly noise; the pitcher-level averages are what matter.
 - **Scale:** LocationPlus = 100 + 10 * z(-mean predicted run value), z against the league-wide qualified pool (config.MIN_PITCHES_FOR_INCLUSION pitches; per pitch type, 100+ pitches and z within that pitch type). 100 = league average, 10 points = 1 SD. --pitcher/--team only filter the output.
-- **Reliability:** each run also writes data/command_reliability.csv: odd/even split-half correlation for LocationPlus, the legacy CommandProxy, Edge%, Meatball%, BB%, first-pitch strike % and 3-ball-count %, plus each metric's correlation with Stuff+.
+- **Reliability:** each run also writes data/results/location_plus/command_reliability.csv: odd/even split-half correlation for LocationPlus, the legacy CommandProxy, Edge%, Meatball%, BB%, first-pitch strike % and 3-ball-count %, plus each metric's correlation with Stuff+.
 
 **Stuff+ columns.** StuffPlus is the ratio (predicted whiff probability / league average for the pitch type x 100), unchanged. StuffPlus_Scaled = 100 + 10 * z(StuffPlus) against the league-wide qualified pool (per pitch type at the pitch-type level), which puts it on exactly the same scale as Location+. StuffPlus_Scaled_Reg regresses it toward 100 for small samples, and StuffPlus_v1 / StuffPlus_Scaled_v1 keep the original model's values. The dashboard's "Stuff+" tiles, bar chart, table and Stuff+ vs. Location+ scatter show StuffPlus_Scaled_Reg.
 
@@ -260,7 +262,7 @@ risk of that for stuff_plus_proxy.py).
 - A full league-wide season pull in one `load_season()` call can OOM on a memory-limited machine during pybaseball's concat step -- confirmed on an 8GB box around the 6-month mark. `load_season_monthly()` works around this (see above) and is used by every league-wide step, including stuff_plus_proxy.py with no flags.
 - Stuff+ Proxy is a gradient-boosted classifier on shape features, not a full replacement for proprietary gradient-boosted Stuff+ models. Out of fold it ranks whiffs only weakly (AUC 0.51 to 0.59) and is over-confident on new pitchers for most pitch types (see "Stuff+ v2"). Extreme release points (e.g. Tyler Rogers) are extrapolated and can get implausible grades.
 - IL history comes from the MLB Stats API transactions feed (analysis/injury_history.py), not manual collection anymore. The feed occasionally leaves out an activation, so when one's missing the return date is taken from the pitcher's first MLB appearance after the placement. Only pitchers you've run it for (--team/--pitcher) have injury data; everyone else gets 0 injury risk in risk_adjusted_value.py (InjuryDataPulled = False).
-- Salaries come from data/salaries.csv, built by hand (not scraped) from saved FanGraphs RosterResource 2025 payroll pages for 29 teams (536 rows; PIT and LAD hand-checked; STL not included yet, so STL pitchers get only the pre-arb league-minimum default and show up in the missing-contract report). Columns: PitcherId, Pitcher, Team, Season, Salary, AAV, ContractStatus, YearsControl, PreArbYearsLeft, ArbYearsLeft, GuaranteedFuture, plus reference columns the pipeline carries but doesn't use (TeamPaid2025, Origin, Source, Notes, FanGraphsId, ServiceTime). Team is a FanGraphs code (ARI, not AZ), renamed SalariesTeam on load. contract_status.load_salaries() drops rows with a blank PitcherId and reads it as an integer. A pitcher traded midseason has one row per team; the last row is kept, and any whose rows disagree on Salary or contract fields are printed on every run. Contract status and years of control can be estimated from debut dates (contract_status.py), but EstServiceYears is SEASON minus debut year: it ignores option years, IL, partial seasons and Super Two, so hand-entered values always win.
+- Salaries come from data/salaries.csv, built by hand (not scraped) from saved FanGraphs RosterResource 2025 payroll pages for all 30 teams (550 rows; PIT and LAD hand-checked). Columns: PitcherId, Pitcher, Team, Season, Salary, AAV, ContractStatus, YearsControl, PreArbYearsLeft, ArbYearsLeft, GuaranteedFuture, plus reference columns the pipeline carries but doesn't use (TeamPaid2025, Origin, Source, Notes, FanGraphsId, ServiceTime). Team is a FanGraphs code (ARI, not AZ), renamed SalariesTeam on load. contract_status.load_salaries() drops rows with a blank PitcherId and reads it as an integer. A pitcher traded midseason has one row per team; see "Contract rules" below for which row is used. Contract status and years of control can be estimated from debut dates (contract_status.py), but EstServiceYears is SEASON minus debut year: it ignores option years, IL, partial seasons and Super Two, so hand-entered values always win.
 - simple_projected_war in risk_adjusted_value.py is an uncalibrated placeholder until regressed against actual historical WAR for a training sample. It uses the same starter-based WAR anchor for relievers, so reliever WAR is overstated.
 - Multi-year surplus holds ProjectedWAR flat across every control year (no aging curve yet), and the arb salary percentages, $/WAR growth, discount rate, injury shrinkage and control-year cap in config.py are assumptions, not fitted values.
 - Pitchers under config.MIN_PITCHES_FOR_INCLUSION (500) pitches now get regressed values (down to config.MIN_PITCHES_TO_DISPLAY = 50) and a risk-adjusted value, but the WAR proxy has no playing-time term: a 150-pitch reliever regressed to league-average talent still projects near LEAGUE_AVG_STARTER_WAR, so small-sample surplus values are overstated even more than qualified relievers'. The k values are fit once on 2025 qualified pitchers and assumed to hold for everyone.

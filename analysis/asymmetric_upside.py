@@ -43,7 +43,7 @@ from analysis.location_plus_proxy import PITCHER_PATH as LOCATION_PITCHER_PATH
 from analysis.stabilization import load_k, regress, reliability
 from analysis.stuff_plus_proxy import LEAGUE_PITCHER_PATH as STUFF_PITCHER_PATH, LEAGUE_SUMMARY_PATH as STUFF_SUMMARY_PATH
 from analysis.stuff_plus_proxy import MIN_SAMPLE_FOR_SUMMARY_V1, RAW_TRAIN_COLUMNS
-from analysis.utils import CACHE_DIR, zscore_vs
+from analysis.utils import RESULTS_DIR, zscore_vs
 from config import COMMAND_METRIC, END_DATE, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_TO_DISPLAY, START_DATE, USE_REGRESSED
 
 if COMMAND_METRIC not in ("location_plus", "legacy"):
@@ -56,7 +56,7 @@ STUFF_COLUMN_USED = "StuffPlus_Scaled" + REG
 COMMAND_COLUMN_USED = COMMAND_COLUMN + REG
 UPSIDE_COLUMN_USED = "AsymmetricUpsideIndex" + REG
 
-OUT_PATH = CACHE_DIR / "asymmetric_upside.parquet"
+OUT_PATH = RESULTS_DIR / "asymmetric_upside.parquet"
 
 # Stuff+ training columns plus what the Command Proxy needs.
 RAW_COLUMNS = RAW_TRAIN_COLUMNS + ["plate_x", "plate_z", "sz_top", "sz_bot", "events"]

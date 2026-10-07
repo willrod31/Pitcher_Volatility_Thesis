@@ -27,13 +27,21 @@ Column contract:
     StuffPlus_Scaled_Reg, StuffPlus_Reliability, LocationPlus_Reg, LocationPlus_Reliability,
     EdgePct_Reg, MeatballPct_Reg, BBPct_Reg, BBPct_Reliability, CommandProxyLegacy_Reg,
     VolatilityScore, VolatilityScore_Reg, VolatilityReliability, VolatilityPercentile_Reg,
-    AsymmetricUpsideIndex_Reg
+    AsymmetricUpsideIndex_Reg, SalarySource, ContractEstimated, ContractValued, ValueNote
+
+ContractEstimated = on the default contract (not in salaries.csv, not
+pre-arb: league minimum, 1 year, FA); the dashboard tags it "est. contract".
+ContractValued = False for config.TWO_WAY_EXCLUDE_VALUE (no surplus values;
+ValueNote says so). team_paid_2025.csv: what each team paid a pitcher it
+shared (salaries.csv TeamPaid2025), one row per pitcher x team.
 """
 import argparse
 from pathlib import Path
 
 import pandas as pd
 
+from analysis.contract_status import load_team_paid
+from analysis.data_acquisition import pitchers_only
 from analysis.injury_history import STINTS_PATH
 from analysis.risk_adjusted_value import OUT_PATH as RISK_ADJUSTED_PATH, SURPLUS_BY_YEAR_PATH
 
@@ -41,6 +49,7 @@ DASHBOARD_DATA = Path(__file__).resolve().parent.parent / "dashboard" / "data"
 OUT_PATH = DASHBOARD_DATA / "pitcher_report_data.csv"
 SURPLUS_OUT_PATH = DASHBOARD_DATA / "surplus_by_year.csv"
 STINTS_OUT_PATH = DASHBOARD_DATA / "injury_stints.csv"
+TEAM_PAID_OUT_PATH = DASHBOARD_DATA / "team_paid_2025.csv"
 
 COLUMN_CONTRACT = [
     "PitcherId", "Pitcher", "Team", "StuffPlus", "StuffPlus_Scaled", "LocationPlus",
@@ -54,7 +63,7 @@ COLUMN_CONTRACT = [
     "StuffPlus_Scaled_Reg", "StuffPlus_Reliability", "LocationPlus_Reg", "LocationPlus_Reliability",
     "EdgePct_Reg", "MeatballPct_Reg", "BBPct_Reg", "BBPct_Reliability", "CommandProxyLegacy_Reg",
     "VolatilityScore", "VolatilityScore_Reg", "VolatilityReliability", "VolatilityPercentile_Reg",
-    "AsymmetricUpsideIndex_Reg",
+    "AsymmetricUpsideIndex_Reg", "SalarySource", "ContractEstimated", "ContractValued", "ValueNote",
 ]
 
 
@@ -117,6 +126,10 @@ def run():
         "VolatilityReliability": df["VolatilityReliability"].round(3),
         "VolatilityPercentile_Reg": df["VolatilityPercentile_Reg"].round(1),
         "AsymmetricUpsideIndex_Reg": df["AsymmetricUpsideIndex_Reg"].round(2),
+        "SalarySource": df["SalarySource"],
+        "ContractEstimated": df["ContractEstimated"],
+        "ContractValued": df["ContractValued"],
+        "ValueNote": df["ValueNote"],
     })[COLUMN_CONTRACT]
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -128,8 +141,12 @@ def run():
         by_year.to_csv(SURPLUS_OUT_PATH, index=False)
         print(f"Saved {len(by_year)} rows to {SURPLUS_OUT_PATH}")
 
+    team_paid = load_team_paid()
+    team_paid.to_csv(TEAM_PAID_OUT_PATH, index=False)
+    print(f"Saved {len(team_paid)} rows to {TEAM_PAID_OUT_PATH}")
+
     if STINTS_PATH.exists():
-        stints = pd.read_csv(STINTS_PATH)
+        stints = pitchers_only(pd.read_csv(STINTS_PATH), "PitcherId")
         stints.to_csv(STINTS_OUT_PATH, index=False)
         print(f"Saved {len(stints)} rows to {STINTS_OUT_PATH}")
 

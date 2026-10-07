@@ -24,10 +24,10 @@ import pandas as pd
 
 from config import SEASON
 from analysis.injury_history import API_BASE, _get_json, resolve_pitchers
-from analysis.utils import CACHE_DIR
+from analysis.utils import CACHE_DIR, MLB_API_DIR, RESULTS_DIR
 
-DEBUT_CACHE_PATH = CACHE_DIR / "mlb_debut_dates.json"
-OUT_PATH = CACHE_DIR / "contract_status_est.csv"
+DEBUT_CACHE_PATH = MLB_API_DIR / "mlb_debut_dates.json"
+OUT_PATH = RESULTS_DIR / "contract_status_est.csv"
 SALARIES_PATH = CACHE_DIR / "salaries.csv"
 BATCH_SIZE = 100
 
@@ -62,9 +62,11 @@ def load_salaries(verbose: bool = False) -> pd.DataFrame | None:
 
     - Blank PitcherId rows are dropped (listed when verbose) -- they can't be
       joined to Statcast.
-    - Traded pitchers appear once per team; the LAST row per PitcherId is kept.
-      With verbose, any PitcherId whose rows disagree on Salary (or another
-      contract field) is printed so it can be fixed by hand.
+    - Traded pitchers appear once per team. The row with the LARGEST Salary
+      is kept (his full 2025 contract, not a prorated release/minimum row),
+      and ContractStatus / YearsControl / GuaranteedFuture come from that same
+      row. What each team actually paid is in load_team_paid(). With verbose,
+      any PitcherId whose rows disagree is printed with the Salary chosen.
     - Team -> SalariesTeam and Pitcher/Season are dropped so the merge in
       risk_adjusted_value.resolve_contracts never produces _x/_y columns.
     """
@@ -86,27 +88,71 @@ def load_salaries(verbose: bool = False) -> pd.DataFrame | None:
 
     if verbose:
         report_duplicate_conflicts(raw)
-    salaries = raw.drop_duplicates("PitcherId", keep="last")
+    salaries = largest_salary_first(raw).drop_duplicates("PitcherId", keep="first")
     return salaries.drop(columns=["Pitcher", "Season"], errors="ignore").rename(columns=SALARY_RENAMES)
 
 
+def largest_salary_first(raw: pd.DataFrame) -> pd.DataFrame:
+    """Rows sorted so each PitcherId's chosen row comes first.
+
+    Largest Salary first. Ties (same contract listed on both teams) go to the
+    row with more contract fields filled in (e.g. the one that lists
+    GuaranteedFuture), then the later row in the file.
+    """
+    fields = [c for c in SALARY_FIELDS_CHECKED if c in raw]
+    order = raw.assign(_filled=raw[fields].notna().sum(axis=1), _row=range(len(raw)))
+    order = order.sort_values(["Salary", "_filled", "_row"], ascending=False, kind="stable", na_position="last")
+    return order.drop(columns=["_filled", "_row"])
+
+
 def report_duplicate_conflicts(raw: pd.DataFrame) -> pd.DataFrame:
-    """Print PitcherIds listed more than once whose rows disagree on Salary / contract fields."""
+    """Print PitcherIds listed more than once whose rows disagree on Salary / contract fields, with the row chosen."""
     dup = raw[raw["PitcherId"].duplicated(keep=False)]
     fields = [c for c in SALARY_FIELDS_CHECKED if c in dup]
     differs = dup.groupby("PitcherId")[fields].nunique(dropna=False) > 1
+    chosen = largest_salary_first(dup).drop_duplicates("PitcherId", keep="first")
     print(f"{dup['PitcherId'].nunique()} PitcherId(s) listed more than once in salaries.csv (traded midseason); "
-          f"the last row is kept.")
+          f"the row with the largest Salary is kept (all contract fields from that row).")
     for field in fields:
         ids = differs.index[differs[field]]
         label = "Salary" if field == "Salary" else f"{field} (not Salary)"
         print(f"  {len(ids)} with different {label} across their rows" + (":" if len(ids) else ""))
         if len(ids):
             rows = dup[dup["PitcherId"].isin(ids)].sort_values(["PitcherId"])
-            kept = rows.index.isin(rows.drop_duplicates("PitcherId", keep="last").index)
-            shown = rows[["PitcherId", "Pitcher", "Team", field]].assign(Kept=kept)
+            shown = rows[["PitcherId", "Pitcher", "Team", field]].assign(Chosen=rows.index.isin(chosen.index))
             print("    " + shown.to_string(index=False).replace("\n", "\n    "))
+    salary_ids = differs.index[differs["Salary"]]
+    picked = chosen[chosen["PitcherId"].isin(salary_ids)][["PitcherId", "Pitcher", "Team", "Salary"]]
+    print("  Salary chosen for each Salary conflict:")
+    print("    " + picked.rename(columns={"Team": "FromTeam", "Salary": "SalaryChosen"})
+          .to_string(index=False).replace("\n", "\n    "))
     return differs
+
+
+# FanGraphs team codes in salaries.csv -> Statcast codes used everywhere else
+FANGRAPHS_TO_STATCAST = {"ARI": "AZ"}
+
+
+def load_team_paid() -> pd.DataFrame:
+    """One row per salaries.csv pitcher x team: PitcherId, Team (Statcast code), ListedSalary, TeamPaid2025.
+
+    TeamPaid2025 is what that team actually paid a pitcher traded midseason
+    (blank when the team paid the full listed Salary). Kept separate from
+    load_salaries(), which keeps one row per pitcher for valuation.
+    """
+    if not SALARIES_PATH.exists():
+        return pd.DataFrame(columns=["PitcherId", "Team", "ListedSalary", "TeamPaid2025"])
+    raw = pd.read_csv(SALARIES_PATH)
+    if "Season" in raw:
+        raw = raw[raw["Season"].isna() | (raw["Season"] == SEASON)]
+    ids = pd.to_numeric(raw["PitcherId"], errors="coerce")
+    raw = raw[ids.notna() & (ids % 1 == 0)].assign(PitcherId=ids.astype("Int64"))
+    if "TeamPaid2025" not in raw:
+        raw["TeamPaid2025"] = pd.NA
+    return pd.DataFrame({
+        "PitcherId": raw["PitcherId"], "Team": raw["Team"].replace(FANGRAPHS_TO_STATCAST),
+        "ListedSalary": raw["Salary"], "TeamPaid2025": raw["TeamPaid2025"],
+    }).reset_index(drop=True)
 
 
 def fetch_debut_info(mlbam_ids, force_refresh: bool = False) -> dict[int, str | None]:

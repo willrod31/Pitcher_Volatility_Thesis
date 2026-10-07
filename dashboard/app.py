@@ -29,6 +29,8 @@ REPORT_PATH = DATA_DIR / "pitcher_report_data.csv"          # from analysis/expo
 SURPLUS_BY_YEAR_PATH = DATA_DIR / "surplus_by_year.csv"     # from analysis/export_report_data.py
 VELOCITY_PATH = DATA_DIR / "velocity_by_game.csv"           # from analysis/stuff_plus_proxy.py --team/--pitcher
 INJURY_STINTS_PATH = DATA_DIR / "injury_stints.csv"         # from analysis/export_report_data.py
+TEAM_PAID_PATH = DATA_DIR / "team_paid_2025.csv"           # from analysis/export_report_data.py
+EST_CONTRACT_TAG = "est. contract"   # default contract: not in salaries.csv, league minimum, 1 yr
 
 # Every MLB team, by league -- (Statcast team code, full name). Lets the
 # sidebar navigate the whole league even though only a handful of pitchers
@@ -127,6 +129,20 @@ def load_report_data(data_version: float):
     report = pd.read_csv(REPORT_PATH)
     by_year = pd.read_csv(SURPLUS_BY_YEAR_PATH) if SURPLUS_BY_YEAR_PATH.exists() else pd.DataFrame()
     return report, by_year
+
+
+@st.cache_data
+def load_team_paid(data_version: float) -> pd.DataFrame:
+    """What each team paid a pitcher it shared (salaries.csv TeamPaid2025), one row per pitcher x team."""
+    return pd.read_csv(TEAM_PAID_PATH) if TEAM_PAID_PATH.exists() else pd.DataFrame()
+
+
+def contract_valued(row) -> bool:
+    return row is None or "ContractValued" not in row or bool(row["ContractValued"])
+
+
+def contract_estimated(row) -> bool:
+    return row is not None and "ContractEstimated" in row and bool(row["ContractEstimated"])
 
 
 @st.cache_data
@@ -481,6 +497,7 @@ stuff_plus_summary, stuff_plus_pitches = load_real_stuff_plus(data_version())
 location_plus = load_location_plus(data_version())
 report_data, surplus_by_year = load_report_data(data_version())
 velocity_games, injury_stints = load_velocity(data_version())
+team_paid = load_team_paid(data_version())
 # league-wide qualified pool for every color; darker league-average gray for numbers on white
 pools = LeaguePools(report_data, neutral=NEUTRAL_COLOR if is_dark_theme() else NEUTRAL_TEXT_LIGHT)
 chart_pools = LeaguePools(report_data)   # chart fills keep the standard #BFBFBF midpoint
@@ -584,6 +601,12 @@ with tab_report:
             else:
                 text = money(value) if fmt is None else fmt.format(value)
                 sample = f"{n:,.0f} {unit}" if n is not None else None
+            if metric == "MultiYearSurplus_M":
+                if not contract_valued(report_row):
+                    # a two-way player's salary pays for hitting too: no pitcher-only value
+                    text, value = f'<span style="font-size:1rem;">{report_row["ValueNote"]}</span>', None
+                elif contract_estimated(report_row) and value is not None:
+                    sample = EST_CONTRACT_TAG
             hover = None
             if raw is not None:
                 hover = f"Raw (unregressed): {fmt.format(raw)}" + (f" · Reliability {rel:.2f}" if rel is not None else "")
@@ -608,9 +631,18 @@ with tab_report:
                 ("" if report_row.get("Qualified", True) else
                  f"Under {MIN_PITCHES_FOR_INCLUSION} pitches: shown with regressed values, not in the league grading pool. ")
                 + f"Graded against every qualified MLB pitcher. Volatility path: {report_row['VolatilityPath']}. "
-                f"Contract: {report_row['ContractStatus']}, {report_row['YearsControl']:.0f} year(s) of control "
-                f"({report_row['ControlSource']}). WAR is an uncalibrated proxy (see README)."
+                + (f"Contract: {report_row['ValueNote']}. " if not contract_valued(report_row) else
+                   f"Contract: {report_row['ContractStatus']}, {report_row['YearsControl']:.0f} year(s) of control "
+                   f"({report_row['ControlSource']})"
+                   + (f", {EST_CONTRACT_TAG}: not in salaries.csv, valued at the league minimum. " if contract_estimated(report_row) else ". "))
+                + "WAR is an uncalibrated proxy (see README)."
             )
+            paid = team_paid[(team_paid["PitcherId"] == pitcher_id) & (team_paid["Team"] == team_choice)] \
+                if not team_paid.empty else pd.DataFrame()
+            if not paid.empty and pd.notna(paid["TeamPaid2025"].iloc[0]):
+                st.caption(f"{team_choice} paid ${paid['TeamPaid2025'].iloc[0] / 1e6:.2f}M of his "
+                           f"${paid['ListedSalary'].iloc[0] / 1e6:.2f}M 2025 salary (traded midseason); "
+                           "he is valued at the full contract.")
 
         pitcher_years = (
             surplus_by_year[surplus_by_year["PitcherId"] == pitcher_id]
@@ -741,6 +773,7 @@ with tab_board:
         team_table = team_ids.merge(
             report_data.drop(columns=["Pitcher", "StuffPlus", "StuffPlus_Scaled", "LocationPlus", "Pitches", "Qualified"]),
             on="PitcherId", how="left")
+        team_table["Contract"] = team_table["ValueNote"].fillna("") if "ValueNote" in team_table else ""
         team_table["Sample"] = [
             "small" if is_small_sample(a) or is_small_sample(b) else ""
             for a, b in zip(team_table["StuffReliability"], team_table["LocationReliability"])
@@ -752,7 +785,7 @@ with tab_board:
             "YearsControl": "Years of control", "MultiYearSurplus_M": "Multi-yr surplus ($M)",
             "SurplusCurrentSeason_M": "2025 surplus ($M)", "PitchesThrown": "Pitches",
         })[["Pitcher", "Pitches", "Stuff+", "Location+", "Sample", "Risk-adj. WAR", "2025 salary ($M)", "Years of control",
-            "Multi-yr surplus ($M)", "2025 surplus ($M)"]].reset_index(drop=True)
+            "Multi-yr surplus ($M)", "2025 surplus ($M)", "Contract"]].reset_index(drop=True)
         reliability_for_column = {
             "Stuff+": team_table["StuffReliability"].reset_index(drop=True),
             "Location+": team_table["LocationReliability"].reset_index(drop=True),
@@ -775,7 +808,9 @@ with tab_board:
             }),
             width='stretch', hide_index=True,
         )
-        st.caption("Stuff+ / Location+ are regressed toward 100 by sample size; faded color = less reliable.")
+        st.caption("Stuff+ / Location+ are regressed toward 100 by sample size; faded color = less reliable. "
+                   f"Contract: \"{EST_CONTRACT_TAG}\" = not in salaries.csv, valued at the league minimum for 1 year; "
+                   "two-way players' contracts are not valued.")
         ungraded = team_table["RiskAdjWAR"].isna().sum()
         if ungraded:
             st.caption(f"{ungraded} pitcher(s) threw under {MIN_PITCHES_TO_DISPLAY} pitches and show n/a.")

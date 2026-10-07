@@ -37,23 +37,23 @@ from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import StandardScaler
 
-from analysis.data_acquisition import CACHE_DIR, END_DATE, START_DATE, load_pitcher_season, load_season_monthly, load_team_roster_full_seasons, primary_team
+from analysis.data_acquisition import END_DATE, START_DATE, pitchers_only, load_pitcher_season, load_season_monthly, load_team_roster_full_seasons, primary_team
 from analysis.stabilization import load_k, regress, reliability
-from analysis.utils import scale_100
+from analysis.utils import STUFF_PLUS_DIR, scale_100
 from config import (
     MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_FOR_SCALE, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, SHOULDER_HEIGHT_FT,
 )
 
 # League-wide, graded vs. the qualified pool (asymmetric_upside.py and the dashboard read these)
-LEAGUE_PITCHES_PATH = CACHE_DIR / "stuff_plus_league_pitches.parquet"   # every pitch, out-of-fold score (cached, slow step)
-LEAGUE_SUMMARY_PATH = CACHE_DIR / "stuff_plus_league_summary.parquet"   # pitcher x pitch type
-LEAGUE_PITCHER_PATH = CACHE_DIR / "stuff_plus_league_pitcher.parquet"   # pitcher
-V1_SUMMARY_PATH = CACHE_DIR / "stuff_plus_v1_league_summary.parquet"    # original model's scores, for StuffPlus_v1
-VALIDATION_PATH = CACHE_DIR / "stuff_plus_validation.csv"
-V1_COMPARISON_PATH = CACHE_DIR / "stuff_plus_v1_comparison.csv"
+LEAGUE_PITCHES_PATH = STUFF_PLUS_DIR / "stuff_plus_league_pitches.parquet"   # every pitch, out-of-fold score (cached, slow step)
+LEAGUE_SUMMARY_PATH = STUFF_PLUS_DIR / "stuff_plus_league_summary.parquet"   # pitcher x pitch type
+LEAGUE_PITCHER_PATH = STUFF_PLUS_DIR / "stuff_plus_league_pitcher.parquet"   # pitcher
+V1_SUMMARY_PATH = STUFF_PLUS_DIR / "stuff_plus_v1_league_summary.parquet"    # original model's scores, for StuffPlus_v1
+VALIDATION_PATH = STUFF_PLUS_DIR / "stuff_plus_validation.csv"
+V1_COMPARISON_PATH = STUFF_PLUS_DIR / "stuff_plus_v1_comparison.csv"
 # This run's --pitcher/--team scope
-SUMMARY_PATH = CACHE_DIR / "stuff_plus_summary.parquet"
-PITCHES_PATH = CACHE_DIR / "stuff_plus_pitches.parquet"
+SUMMARY_PATH = STUFF_PLUS_DIR / "stuff_plus_summary.parquet"
+PITCHES_PATH = STUFF_PLUS_DIR / "stuff_plus_pitches.parquet"
 
 DASHBOARD_DATA = Path(__file__).resolve().parent.parent / "dashboard" / "data"
 DASHBOARD_PATH = DASHBOARD_DATA / "stuff_plus_pitch_types.csv"
@@ -196,7 +196,8 @@ def fit_and_score_oof(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 def build_league_scores(train_df: pd.DataFrame | None = None, force_refresh: bool = False) -> pd.DataFrame:
     """Every league pitch with its out-of-fold Stuff+, cached (the slow step). Writes the validation table."""
     if LEAGUE_PITCHES_PATH.exists() and not force_refresh:
-        return pd.read_parquet(LEAGUE_PITCHES_PATH)
+        # pitchers_only: the cache may predate the position filter
+        return pitchers_only(pd.read_parquet(LEAGUE_PITCHES_PATH), "PitcherId")
 
     if train_df is None:
         print(f"Pulling league-wide Statcast {TRAIN_START} to {TRAIN_END} (month by month)...")
@@ -460,6 +461,17 @@ def upsert_csv(rows: pd.DataFrame, path: Path, keys: list[str] | None = None):
         rows = pd.concat([existing, rows], ignore_index=True)
     rows.to_csv(path, index=False)
     print(f"Saved {len(rows)} row(s) to {path}")
+
+
+def purge_non_pitchers_from_dashboard():
+    """Drop position players' rows (left by older runs) from every upserted dashboard CSV."""
+    for path in [DASHBOARD_PATH, DASHBOARD_PITCHES_PATH, MOVEMENT_PITCHES_PATH, VELOCITY_PATH]:
+        if path.exists():
+            rows = pd.read_csv(path)
+            kept = pitchers_only(rows, "PitcherId")
+            if len(kept) < len(rows):
+                kept.to_csv(path, index=False)
+                print(f"Removed {len(rows) - len(kept)} non-pitcher row(s) from {path.name}")
 
 
 def save_pitches_for_dashboard(per_pitch: pd.DataFrame):

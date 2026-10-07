@@ -29,15 +29,15 @@ import requests
 
 from config import INJURY_LOOKBACK_SEASONS, SEASON
 from analysis.data_acquisition import attach_pitcher_names, lookup_mlbam_id, team_roster_ids
-from analysis.utils import CACHE_DIR
+from analysis.utils import GAMELOG_DIR, MLB_API_DIR, RESULTS_DIR, TRANSACTIONS_DIR
 
 API_BASE = "https://statsapi.mlb.com/api/v1"
 REQUEST_SLEEP_SECONDS = 0.5
 DUPLICATE_PLACEMENT_DAYS = 3
-SEASON_DATES_PATH = CACHE_DIR / "mlb_season_dates.json"
+SEASON_DATES_PATH = MLB_API_DIR / "mlb_season_dates.json"
 
-STINTS_PATH = CACHE_DIR / "injury_stints.csv"
-SUMMARY_PATH = CACHE_DIR / "injury_summary.csv"
+STINTS_PATH = RESULTS_DIR / "injury_stints.csv"
+SUMMARY_PATH = RESULTS_DIR / "injury_summary.csv"
 
 # MLB team ids (these don't change when a team renames/moves). Anything else
 # is a minor league team, which we skip.
@@ -101,7 +101,7 @@ def fetch_transactions(mlbam_id: int, start_season: int | None = None, end_seaso
     start_season = start_season or default_start
     end_season = end_season or default_end
 
-    raw_path = CACHE_DIR / f"transactions_{mlbam_id}_{start_season}_{end_season}.json"
+    raw_path = TRANSACTIONS_DIR / f"transactions_{mlbam_id}_{start_season}_{end_season}.json"
     if raw_path.exists() and not force_refresh:
         return json.loads(raw_path.read_text())
 
@@ -142,7 +142,7 @@ def season_dates(season: int, force_refresh: bool = False) -> tuple[pd.Timestamp
 
 def fetch_appearance_dates(mlbam_id: int, season: int, force_refresh: bool = False) -> list[pd.Timestamp]:
     """Dates they pitched in an MLB regular season game that year."""
-    raw_path = CACHE_DIR / f"gamelog_{mlbam_id}_{season}.json"
+    raw_path = GAMELOG_DIR / f"gamelog_{mlbam_id}_{season}.json"
     if raw_path.exists() and not force_refresh:
         dates = json.loads(raw_path.read_text())
     else:

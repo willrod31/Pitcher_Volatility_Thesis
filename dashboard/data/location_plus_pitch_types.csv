@@ -319,7 +319,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 573204,Caleb Thielbar,FF,339,111.6,106.7,0.582,True,793,111.2,108.2,0.735,True
 573204,Caleb Thielbar,SL,107,98.9,99.5,0.47,True,793,111.2,108.2,0.735,True
 573204,Caleb Thielbar,ST,120,109.6,104.8,0.502,True,793,111.2,108.2,0.735,True
-573262,Mike Yastrzemski,CU,1,39.9,,0.01,False,1,-0.6,,0.003,False
 579328,Yusei Kikuchi,CH,365,83.6,86.7,0.811,True,3007,104.6,104.2,0.913,True
 579328,Yusei Kikuchi,CU,468,110.4,108.6,0.826,True,3007,104.6,104.2,0.913,True
 579328,Yusei Kikuchi,FF,1047,95.1,96.0,0.811,True,3007,104.6,104.2,0.913,True
@@ -819,7 +818,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 621383,Tanner Banks,SI,130,101.2,100.5,0.426,True,1055,114.4,111.3,0.787,True
 621383,Tanner Banks,SL,380,108.0,106.1,0.759,True,1055,114.4,111.3,0.787,True
 621383,Tanner Banks,ST,254,106.3,104.3,0.681,True,1055,114.4,111.3,0.787,True
-621512,Tomás Nido,SL,2,-90.9,,0.016,False,2,-164.4,,0.007,False
 622253,Dillon Tate,CH,29,72.8,93.1,0.255,False,139,83.8,94.7,0.327,False
 622253,Dillon Tate,FF,3,22.5,,0.012,False,139,83.8,94.7,0.327,False
 622253,Dillon Tate,SI,47,90.5,98.0,0.212,False,139,83.8,94.7,0.327,False
@@ -929,7 +927,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 640462,A. J. Puk,FF,79,124.8,106.1,0.245,False,128,98.5,99.5,0.309,False
 640462,A. J. Puk,SI,2,2.1,,0.011,False,128,98.5,99.5,0.309,False
 640462,A. J. Puk,SL,47,52.3,86.6,0.281,False,128,98.5,99.5,0.309,False
-640902,Jhonny Pereda,FF,6,19.6,,0.024,False,6,-29.3,,0.021,False
 641154,Pablo López,CH,247,109.4,107.0,0.744,True,1169,114.6,111.7,0.803,True
 641154,Pablo López,CU,119,101.7,100.9,0.547,True,1169,114.6,111.7,0.803,True
 641154,Pablo López,FF,482,117.8,111.8,0.664,True,1169,114.6,111.7,0.803,True
@@ -948,7 +945,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 641329,Bryan Baker,CH,297,96.6,97.4,0.778,True,1057,99.2,99.4,0.787,True
 641329,Bryan Baker,FF,498,98.3,98.9,0.671,True,1057,99.2,99.4,0.787,True
 641329,Bryan Baker,SL,262,103.1,102.1,0.685,True,1057,99.2,99.4,0.787,True
-641343,Jake Bauers,FF,2,106.6,,0.008,False,2,107.9,,0.007,False
 641386,Ben Bowden,CH,22,89.6,97.9,0.206,False,187,108.4,103.3,0.395,False
 641386,Ben Bowden,CU,2,71.4,,0.02,False,187,108.4,103.3,0.395,False
 641386,Ben Bowden,FF,110,107.4,102.3,0.311,True,187,108.4,103.3,0.395,False
@@ -1273,7 +1269,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 656876,Drew Rasmussen,SI,513,108.7,106.5,0.745,True,2235,103.7,103.3,0.887,True
 656876,Drew Rasmussen,SL,5,0.7,,0.04,False,2235,103.7,103.3,0.887,True
 656876,Drew Rasmussen,ST,106,105.3,102.5,0.471,True,2235,103.7,103.3,0.887,True
-656896,Emmanuel Rivera,CH,1,93.1,,0.012,False,1,85.8,,0.003,False
 656945,Tanner Scott,FF,448,104.5,102.9,0.647,True,862,104.8,103.6,0.751,True
 656945,Tanner Scott,SI,2,69.2,,0.011,False,862,104.8,103.6,0.751,True
 656945,Tanner Scott,SL,412,96.0,96.9,0.774,True,862,104.8,103.6,0.751,True
@@ -2058,7 +2053,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 669713,Hayden Wesneski,FF,186,112.4,105.4,0.433,True,508,116.3,110.4,0.64,True
 669713,Hayden Wesneski,SI,56,114.5,103.5,0.242,False,508,116.3,110.4,0.64,True
 669713,Hayden Wesneski,ST,125,116.6,108.5,0.512,True,508,116.3,110.4,0.64,True
-669717,Will Wilson,CH,4,52.3,,0.045,False,4,13.1,,0.014,False
 669721,Davis Daniel,FF,93,96.6,99.1,0.276,False,143,98.0,99.3,0.333,False
 669721,Davis Daniel,FS,1,53.9,,0.012,False,143,98.0,99.3,0.333,False
 669721,Davis Daniel,SL,30,106.9,101.4,0.199,False,143,98.0,99.3,0.333,False
@@ -2448,7 +2442,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 676684,Will Vest,FF,581,107.4,105.2,0.704,True,1117,111.2,108.9,0.796,True
 676684,Will Vest,SI,186,108.0,104.1,0.515,True,1117,111.2,108.9,0.796,True
 676684,Will Vest,SL,267,103.7,102.5,0.689,True,1117,111.2,108.9,0.796,True
-676701,Alan Trejo,CH,2,39.0,,0.023,False,2,-10.6,,0.007,False
 676702,Hunter Stratton,FC,73,102.5,100.8,0.331,False,343,98.7,99.3,0.545,False
 676702,Hunter Stratton,FF,160,100.5,100.2,0.396,True,343,98.7,99.3,0.545,False
 676702,Hunter Stratton,FS,4,83.8,,0.047,False,343,98.7,99.3,0.545,False
@@ -2696,7 +2689,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 680767,Victor Vodnik,FF,496,93.8,95.8,0.67,True,895,92.8,94.5,0.758,True
 680767,Victor Vodnik,SI,4,127.8,,0.022,False,895,92.8,94.5,0.758,True
 680767,Victor Vodnik,SL,113,107.6,103.7,0.484,True,895,92.8,94.5,0.758,True
-680837,Ryan Fitzgerald,SL,6,159.6,,0.047,False,6,197.2,,0.021,False
 680880,Grant Holman,FF,179,86.8,94.4,0.423,True,350,86.7,92.7,0.55,False
 680880,Grant Holman,FS,121,101.9,101.1,0.599,True,350,86.7,92.7,0.55,False
 680880,Grant Holman,SL,50,83.9,95.3,0.293,False,350,86.7,92.7,0.55,False
@@ -3003,7 +2995,6 @@ PitcherId,Pitcher,PitchType,Pitches,LocationPlus,LocationPlus_Reg,LocationPlus_R
 686654,Ty Adcock,FS,1,103.6,,0.012,False,78,100.1,100.0,0.214,False
 686654,Ty Adcock,SI,1,38.8,,0.006,False,78,100.1,100.0,0.214,False
 686654,Ty Adcock,SL,25,116.3,102.8,0.172,False,78,100.1,100.0,0.214,False
-686676,Korey Lee,FF,2,209.6,,0.008,False,2,270.4,,0.007,False
 686701,Ryan Bergert,CH,99,86.9,92.9,0.538,False,1312,105.0,104.1,0.821,True
 686701,Ryan Bergert,CU,10,76.9,,0.092,False,1312,105.0,104.1,0.821,True
 686701,Ryan Bergert,FF,558,101.6,101.1,0.696,True,1312,105.0,104.1,0.821,True

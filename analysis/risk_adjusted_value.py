@@ -53,6 +53,7 @@ from config import (
     REPLACEMENT_LEVEL_WAR,
     MIN_PITCHES_TO_DISPLAY,
     SEASON,
+    TWO_WAY_EXCLUDE_VALUE,
     USE_REGRESSED,
     VOLATILITY_SHRINKAGE,
     WAR_PER_TALENT_Z,
@@ -62,12 +63,17 @@ from analysis.data_acquisition import filter_to_team, team_roster_ids
 from analysis.contract_status import estimate_contract_status, load_salaries, save_estimates, status_group
 from analysis.injury_history import SUMMARY_PATH as INJURY_SUMMARY_PATH
 from analysis.volatility_discount import OUT_PATH as VOLATILITY_PATH
-from analysis.utils import CACHE_DIR, zscore_vs
+from analysis.utils import RESULTS_DIR, zscore_vs
 
-OUT_PATH = CACHE_DIR / "risk_adjusted_value.parquet"
-SURPLUS_BY_YEAR_PATH = CACHE_DIR / "surplus_by_year.csv"
+OUT_PATH = RESULTS_DIR / "risk_adjusted_value.parquet"
+SURPLUS_BY_YEAR_PATH = RESULTS_DIR / "surplus_by_year.csv"
 
 CONTRACT_FIELDS = ["ContractStatus", "YearsControl", "PreArbYearsLeft", "ArbYearsLeft"]
+SALARY_SOURCE_CSV = "salaries.csv"
+SALARY_SOURCE_PRE_ARB = "Pre-arb: league minimum (debut-date estimate)"
+SALARY_SOURCE_DEFAULT = "Default: league minimum (not in salaries.csv)"
+SALARY_SOURCE_TWO_WAY = "Two-way player: not valued"
+TWO_WAY_NOTE = "Two-way player: contract not valued"
 VOLATILITY_PERCENTILE_USED = "VolatilityPercentile_Reg" if USE_REGRESSED else "VolatilityPercentile"
 
 
@@ -131,7 +137,22 @@ def apply_risk_shrinkage(merged: pd.DataFrame) -> pd.DataFrame:
 
 
 def resolve_contracts(merged: pd.DataFrame, salaries: pd.DataFrame | None) -> pd.DataFrame:
-    """Hand-entered salaries.csv values, falling back field-by-field to the debut-date estimate."""
+    """2025 contract for every pitcher, in this order of precedence:
+
+    1. salaries.csv row: its Salary, ContractStatus and YearsControl win
+       (blank YearsControl / pre-arb / arb years fall back to the debut-date estimate).
+    2. Not in salaries.csv, pre-arb by the debut-date estimate: league minimum,
+       estimated years of control (SalarySource = SALARY_SOURCE_PRE_ARB).
+    3. Not in salaries.csv, not pre-arb by the estimate: league minimum,
+       YearsControl = 1, ContractStatus = "FA" (SalarySource = SALARY_SOURCE_DEFAULT).
+    4. No debut date either: no Salary ("needs data" in the missing-contract report).
+
+    StatusMismatch only flags statuses that came from the debut-date estimate:
+    the estimate says arb but rule 3 assumed FA. When salaries.csv has a row,
+    its status wins and is never flagged (EstimateDisagrees keeps the
+    estimate-vs-salaries.csv comparison, for reference only).
+    Two-way players (config.TWO_WAY_EXCLUDE_VALUE) get no Salary: ContractValued = False.
+    """
     est = estimate_contract_status(merged[["PitcherId", "Pitcher"]])
     save_estimates(est)
     merged = merged.merge(est.drop(columns="Pitcher"), on="PitcherId", how="left")
@@ -146,15 +167,33 @@ def resolve_contracts(merged: pd.DataFrame, salaries: pd.DataFrame | None) -> pd
         if col not in merged:
             merged[col] = np.nan
 
+    in_csv = merged["InSalariesCsv"]
     merged["ContractStatusHand"] = merged["ContractStatus"]
     hand_group = merged["ContractStatus"].map(status_group)
-    merged["StatusMismatch"] = hand_group.notna() & merged["ContractStatus_est"].notna() & (hand_group != merged["ContractStatus_est"])
+    merged["EstimateDisagrees"] = hand_group.notna() & merged["ContractStatus_est"].notna() & (hand_group != merged["ContractStatus_est"])
     merged["ContractStatus"] = hand_group.fillna(merged["ContractStatus_est"])
+    merged["ContractStatusSource"] = np.where(hand_group.notna(), "salaries.csv",
+                                              np.where(merged["ContractStatus_est"].notna(), "estimate", None))
 
     merged["ControlSource"] = np.where(merged["YearsControl"].notna(), "hand", "estimate")
     merged["YearsControl"] = merged["YearsControl"].fillna(merged["EstYearsControl"])
     merged["PreArbYearsLeft"] = merged["PreArbYearsLeft"].fillna(merged["EstPreArbYearsLeft"])
     merged["ArbYearsLeft"] = merged["ArbYearsLeft"].fillna(merged["EstArbYearsLeft"])
+
+    merged["SalarySource"] = np.where(merged["Salary"].notna(), SALARY_SOURCE_CSV, None)
+    pre_arb = ~in_csv & (merged["ContractStatus_est"] == "pre-arb")
+    merged.loc[pre_arb, "Salary"] = league_min_salary(SEASON)
+    merged.loc[pre_arb, "SalarySource"] = SALARY_SOURCE_PRE_ARB
+
+    default = ~in_csv & merged["ContractStatus_est"].notna() & (merged["ContractStatus_est"] != "pre-arb")
+    merged["StatusMismatch"] = default & (merged["ContractStatus_est"] == "arb")
+    merged.loc[default, "Salary"] = league_min_salary(SEASON)
+    merged.loc[default, "SalarySource"] = SALARY_SOURCE_DEFAULT
+    merged.loc[default, "ContractStatus"] = "FA"
+    merged.loc[default, ["YearsControl", "PreArbYearsLeft", "ArbYearsLeft"]] = [1, 0, 0]
+    merged.loc[default, "ControlSource"] = "default (1 yr)"
+    merged["ContractEstimated"] = default
+
     # a pitcher on this season's roster is under control for at least this season --
     # but if nothing says how long, flag it rather than silently assuming 1 year
     no_control = merged["YearsControl"].isna() | (merged["YearsControl"] < 1)
@@ -163,10 +202,14 @@ def resolve_contracts(merged: pd.DataFrame, salaries: pd.DataFrame | None) -> pd
     for col in ["YearsControl", "PreArbYearsLeft", "ArbYearsLeft"]:
         merged[col] = merged[col].fillna(0).astype(int)
 
-    merged["SalarySource"] = np.where(merged["Salary"].notna(), "hand", None)
-    fill_min = merged["Salary"].isna() & (merged["ContractStatus"] == "pre-arb")
-    merged.loc[fill_min, "Salary"] = league_min_salary(SEASON)
-    merged.loc[fill_min, "SalarySource"] = "league min"
+    two_way = merged["PitcherId"].isin(TWO_WAY_EXCLUDE_VALUE)
+    merged["ContractValued"] = ~two_way
+    merged.loc[two_way, ["Salary", "AAV", "GuaranteedFuture"]] = np.nan
+    merged.loc[two_way, "SalarySource"] = SALARY_SOURCE_TWO_WAY
+    merged.loc[two_way, "ContractStatus"] = "two-way"
+    merged.loc[two_way, "ControlSource"] = "not valued"
+    merged.loc[two_way, ["StatusMismatch", "ContractEstimated"]] = False
+    merged["ValueNote"] = np.where(two_way, TWO_WAY_NOTE, np.where(merged["ContractEstimated"], "est. contract", ""))
     return merged
 
 
@@ -255,21 +298,29 @@ def add_multi_year_surplus(merged: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataF
 
 
 def report_flags(scope: pd.DataFrame):
-    """Print pitchers whose contract data is estimated, missing, or disagrees with the estimate."""
+    """Print pitchers whose contract is defaulted, missing, or estimate-sourced and contradicted."""
     mismatch = scope[scope["StatusMismatch"]]
-    print(f"\n{len(mismatch)} pitcher(s) where the estimate disagrees with the hand-entered ContractStatus:")
+    print(f"\n{len(mismatch)} pitcher(s) defaulted to FA although the debut-date estimate says arb:")
     if not mismatch.empty:
-        print(mismatch[["Pitcher", "ContractStatusHand", "ContractStatus_est", "EstServiceYears", "MLBDebutDate"]].to_string(index=False))
+        print(mismatch[["Pitcher", "ContractStatus_est", "EstServiceYears", "MLBDebutDate"]].to_string(index=False))
 
-    not_hand = scope[scope["ControlSource"] != "hand"]
-    print(f"\n{len(not_hand)} pitcher(s) with blank YearsControl in salaries.csv (using estimate or 1 year):")
-    if not not_hand.empty:
-        print(not_hand[["Pitcher", "ContractStatus", "YearsControl", "ControlSource", "EstYearsControl"]].to_string(index=False))
+    default = scope[scope["ContractEstimated"]]
+    print(f"\n{len(default)} pitcher(s) on the default contract ({SALARY_SOURCE_DEFAULT}, 1 yr, FA):")
+    if not default.empty:
+        print(default[["Pitcher", "ContractStatus_est", "EstServiceYears"]].to_string(index=False))
 
-    no_salary = scope[scope["Salary"].isna()]
+    estimated = scope[scope["InSalariesCsv"] & (scope["ControlSource"] != "hand")]
+    print(f"\n{len(estimated)} salaries.csv pitcher(s) with blank YearsControl (using estimate or 1 year):")
+    if not estimated.empty:
+        print(estimated[["Pitcher", "ContractStatus", "YearsControl", "ControlSource", "EstYearsControl"]].to_string(index=False))
+
+    no_salary = scope[scope["Salary"].isna() & scope["ContractValued"]]
     if not no_salary.empty:
-        print(f"\n{len(no_salary)} pitcher(s) with no Salary (not pre-arb, not in salaries.csv) -- no surplus computed:")
+        print(f"\n{len(no_salary)} pitcher(s) with no Salary (no salaries.csv row, no debut date) -- no surplus computed:")
         print(no_salary[["Pitcher", "ContractStatus"]].to_string(index=False))
+    two_way = scope[~scope["ContractValued"]]
+    if not two_way.empty:
+        print(f"\n{TWO_WAY_NOTE}: {', '.join(two_way['Pitcher'])}")
 
 
 def run(team: str | None = None):

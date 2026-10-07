@@ -11,19 +11,28 @@ import shutil
 
 import numpy as np
 import pandas as pd
+import requests
 
 import pybaseball as pb
 
 from config import END_DATE, MIN_PITCHES_FOR_INCLUSION, START_DATE
-from analysis.utils import CACHE_DIR
+from analysis.utils import CACHE_DIR, STATCAST_LEAGUE_DIR, STATCAST_PITCHER_DIR, STATCAST_TEAM_DIR
 
 # Non pitch types that show up in the raw feed and aren't real pitches.
 NON_PITCH_TYPES = {"PO", "IN", "EP", "FA", "UN", "SC"}
 
+# Primary position per MLBAM id (MLB Stats API /people), cached. Only pitchers
+# ("1") and two-way players ("Y") are kept anywhere in the pipeline; position
+# players who threw mop-up innings are dropped (see pitchers_only()).
+POSITIONS_PATH = CACHE_DIR / "player_positions.csv"
+PEOPLE_URL = "https://statsapi.mlb.com/api/v1/people"
+PITCHER_POSITION_CODES = {"1", "Y"}
+TWO_WAY_POSITION_CODE = "Y"
+
 
 def fetch_statcast(start_date: str = START_DATE, end_date: str = END_DATE, force_refresh: bool = False) -> pd.DataFrame:
     """Pull league-wide pitch-level Statcast data for a date range, cached to disk."""
-    raw_path = CACHE_DIR / f"statcast_raw_{start_date}_{end_date}.parquet"
+    raw_path = STATCAST_LEAGUE_DIR / f"statcast_raw_{start_date}_{end_date}.parquet"
     if raw_path.exists() and not force_refresh:
         return pd.read_parquet(raw_path)
 
@@ -43,7 +52,7 @@ def fetch_statcast_pitcher(pitcher_name: str, start_date: str = START_DATE, end_
     environment where a league-wide pull for the same range would OOM.
     """
     slug = pitcher_name.strip().lower().replace(" ", "_")
-    raw_path = CACHE_DIR / f"statcast_pitcher_{slug}_{start_date}_{end_date}.parquet"
+    raw_path = STATCAST_PITCHER_DIR / f"statcast_pitcher_{slug}_{start_date}_{end_date}.parquet"
     if raw_path.exists() and not force_refresh:
         return pd.read_parquet(raw_path)
 
@@ -88,7 +97,7 @@ def fetch_statcast_team(team: str, start_date: str = START_DATE, end_date: str =
     small enough to never hit the league-wide OOM ceiling, and gets every
     pitcher on the staff in one request instead of one per pitcher.
     """
-    raw_path = CACHE_DIR / f"statcast_team_{team}_{start_date}_{end_date}.parquet"
+    raw_path = STATCAST_TEAM_DIR / f"statcast_team_{team}_{start_date}_{end_date}.parquet"
     if raw_path.exists() and not force_refresh:
         return pd.read_parquet(raw_path)
 
@@ -125,10 +134,10 @@ def seed_team_caches_from_league(teams, start_date: str = START_DATE, end_date: 
     processed one at a time and split into per-team part files, so memory
     stays at one raw month. Returns the teams it wrote.
     """
-    todo = [t for t in teams if not (CACHE_DIR / f"statcast_team_{t}_{start_date}_{end_date}.parquet").exists()]
+    todo = [t for t in teams if not (STATCAST_TEAM_DIR / f"statcast_team_{t}_{start_date}_{end_date}.parquet").exists()]
     if not todo:
         return []
-    parts_dir = CACHE_DIR / "_team_parts"
+    parts_dir = STATCAST_TEAM_DIR / "_parts"
     parts_dir.mkdir(exist_ok=True)
     try:
         for n, (chunk_start, chunk_end) in enumerate(_month_chunks(start_date, end_date)):
@@ -140,7 +149,7 @@ def seed_team_caches_from_league(teams, start_date: str = START_DATE, end_date: 
         for team in todo:
             parts = sorted(parts_dir.glob(f"{team}_*.parquet"))
             df = pd.concat([pd.read_parquet(f) for f in parts], ignore_index=True)
-            df.to_parquet(CACHE_DIR / f"statcast_team_{team}_{start_date}_{end_date}.parquet", index=False)
+            df.to_parquet(STATCAST_TEAM_DIR / f"statcast_team_{team}_{start_date}_{end_date}.parquet", index=False)
     finally:
         shutil.rmtree(parts_dir, ignore_errors=True)
     return todo
@@ -158,12 +167,12 @@ def team_roster_ids(team: str, start_date: str = START_DATE, end_date: str = END
 
 @functools.lru_cache(maxsize=None)
 def _team_roster_ids(team: str, start_date: str, end_date: str, force_refresh: bool) -> pd.DataFrame:
-    cached = CACHE_DIR / f"statcast_team_{team}_{start_date}_{end_date}.parquet"
+    cached = STATCAST_TEAM_DIR / f"statcast_team_{team}_{start_date}_{end_date}.parquet"
     if cached.exists() and not force_refresh:
         raw = pd.read_parquet(cached, columns=["pitcher"])   # only the ids are needed
     else:
         raw = fetch_statcast_team(team, start_date, end_date, force_refresh=force_refresh)
-    named = attach_pitcher_names(raw[["pitcher"]].drop_duplicates())
+    named = attach_pitcher_names(pitchers_only(raw[["pitcher"]].drop_duplicates()))
     named = named.dropna(subset=["Pitcher"]).rename(columns={"pitcher": "PitcherId"})
     named["PitcherId"] = named["PitcherId"].astype(int)
     return named.sort_values("Pitcher").reset_index(drop=True)
@@ -293,11 +302,43 @@ def load_season_monthly(start_date: str = START_DATE, end_date: str = END_DATE, 
             raw = raw[columns]
         chunks.append(raw)
 
-    raw = pd.concat(chunks, ignore_index=True)
+    raw = pitchers_only(pd.concat(chunks, ignore_index=True))
     df = attach_pitcher_names(raw)
     df = attach_pitcher_team(df)
     df = clean_pitch_physics(df)
     return df
+
+
+def fetch_positions(mlbam_ids) -> pd.DataFrame:
+    """PitcherId, Name, PositionCode, PositionAbbrev for every id, from /people (batched, cached in POSITIONS_PATH)."""
+    cache = pd.read_csv(POSITIONS_PATH, dtype={"PositionCode": str}) if POSITIONS_PATH.exists() else \
+        pd.DataFrame(columns=["PitcherId", "Name", "PositionCode", "PositionAbbrev"])
+    ids = sorted({int(i) for i in mlbam_ids})
+    missing = [i for i in ids if i not in set(cache["PitcherId"])]
+    rows = []
+    for n in range(0, len(missing), 100):
+        batch = missing[n:n + 100]
+        resp = requests.get(PEOPLE_URL, params={"personIds": ",".join(map(str, batch))}, timeout=30)
+        resp.raise_for_status()
+        for person in resp.json().get("people", []):
+            position = person.get("primaryPosition", {})
+            rows.append({"PitcherId": person["id"], "Name": person.get("fullName"),
+                         "PositionCode": str(position.get("code")), "PositionAbbrev": position.get("abbreviation")})
+    if rows:
+        cache = pd.concat([cache, pd.DataFrame(rows)], ignore_index=True).sort_values("PitcherId")
+        cache.to_csv(POSITIONS_PATH, index=False)
+    return cache[cache["PitcherId"].isin(ids)].reset_index(drop=True)
+
+
+def non_pitcher_ids(mlbam_ids) -> set[int]:
+    """Ids whose primary position is not pitcher or two-way (ids the API doesn't know are kept)."""
+    positions = fetch_positions(mlbam_ids)
+    return set(positions.loc[~positions["PositionCode"].isin(PITCHER_POSITION_CODES), "PitcherId"].astype(int))
+
+
+def pitchers_only(df: pd.DataFrame, id_col: str = "pitcher") -> pd.DataFrame:
+    """Drop rows for position players (primary position not P or two-way)."""
+    return df[~df[id_col].isin(non_pitcher_ids(df[id_col].dropna().unique()))]
 
 
 def filter_qualified(df: pd.DataFrame, min_pitches: int = MIN_PITCHES_FOR_INCLUSION) -> pd.DataFrame:

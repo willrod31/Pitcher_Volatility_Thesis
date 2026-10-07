@@ -4,8 +4,24 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# data/ layout (see data/README.md):
+#   data/                       files you edit or read: salaries.csv, missing_contract_report.csv
+#   data/raw/statcast/          cached Statcast pulls (league months, teams, single pitchers)
+#   data/raw/mlb_api/           cached MLB Stats API responses (debut dates, transactions, game logs)
+#   data/results/               each analysis module's output tables
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data"
-CACHE_DIR.mkdir(exist_ok=True)
+STATCAST_LEAGUE_DIR = CACHE_DIR / "raw" / "statcast" / "league"
+STATCAST_TEAM_DIR = CACHE_DIR / "raw" / "statcast" / "teams"
+STATCAST_PITCHER_DIR = CACHE_DIR / "raw" / "statcast" / "pitchers"
+MLB_API_DIR = CACHE_DIR / "raw" / "mlb_api"
+TRANSACTIONS_DIR = MLB_API_DIR / "transactions"
+GAMELOG_DIR = MLB_API_DIR / "gamelogs"
+RESULTS_DIR = CACHE_DIR / "results"
+STUFF_PLUS_DIR = RESULTS_DIR / "stuff_plus"
+LOCATION_PLUS_DIR = RESULTS_DIR / "location_plus"
+for _d in (STATCAST_LEAGUE_DIR, STATCAST_TEAM_DIR, STATCAST_PITCHER_DIR, TRANSACTIONS_DIR, GAMELOG_DIR,
+           STUFF_PLUS_DIR, LOCATION_PLUS_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
 
 
 def zscore(series: pd.Series) -> pd.Series:

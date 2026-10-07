@@ -35,6 +35,7 @@ import time
 import traceback
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from config import END_DATE, START_DATE
@@ -42,8 +43,10 @@ from analysis import (
     asymmetric_upside, contract_status, export_report_data, injury_history, location_plus_proxy,
     risk_adjusted_value, stuff_plus_proxy, volatility_discount,
 )
-from analysis.data_acquisition import load_season_monthly, seed_team_caches_from_league, team_roster_ids
-from analysis.utils import CACHE_DIR
+from analysis.data_acquisition import (
+    PITCHER_POSITION_CODES, fetch_positions, load_season_monthly, seed_team_caches_from_league, team_roster_ids,
+)
+from analysis.utils import CACHE_DIR, STATCAST_TEAM_DIR
 
 # Statcast team codes (AZ, not ARI), same list as dashboard/app.py
 TEAMS = [
@@ -53,10 +56,13 @@ TEAMS = [
 TEAM_ALIASES = {"ARI": "AZ"}   # FanGraphs / salaries.csv code -> Statcast
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 REPORT_PATH = CACHE_DIR / "missing_contract_report.csv"
-REPORT_COLUMNS = ["PitcherId", "Pitcher", "Team", "Problem", "ContractStatus_est", "EstYearsControl", "Pitches2025"]
-PROBLEM_NO_SALARY = "no salary"
+REPORT_COLUMNS = ["PitcherId", "Pitcher", "Team", "Problem", "Fix", "ContractStatus_est", "EstYearsControl", "Pitches2025"]
+PROBLEM_DEFAULT = "not in salaries.csv"
+PROBLEM_MISMATCH = "status mismatch (estimate says arb, defaulted to FA)"
+PROBLEM_NO_SALARY = "no salary (not in salaries.csv, no debut date)"
 PROBLEM_NO_CONTROL = "missing (1 yr assumed)"
-PROBLEM_MISMATCH = "status mismatch"
+FIX_DEFAULT = "default min"
+FIX_NEEDS_DATA = "needs data"
 SIZE_LIMIT_MB = 25
 
 # One league frame for Stuff+ grading, the per-team Stuff+ exports and asymmetric_upside
@@ -102,48 +108,73 @@ def team_scope(league: pd.DataFrame, team: str) -> pd.DataFrame:
 
 
 def build_missing_report(pitches_by_id: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """(problem rows, per pitcher x team contract resolution) for everyone on a team in the dashboard's Stuff+ table.
+    """(report rows, per pitcher x team contract resolution) for every pitcher on a team in the dashboard.
 
-    Same fallbacks as risk_adjusted_value.resolve_contracts, applied to every
+    Same rules as risk_adjusted_value.resolve_contracts, applied to every
     roster pitcher (including those under MIN_PITCHES_TO_DISPLAY, who the
     dashboard still lists). One row per pitcher x team, so a traded pitcher
-    is counted under each team; several problems are joined with "; ".
+    is counted under each team. Fix = "default min" (valued on the default
+    contract: league minimum, 1 yr, FA) or "needs data" (nothing to value him
+    on, or no years of control). Two-way players aren't valued, so they're
+    not listed.
     """
     roster = pd.read_csv(stuff_plus_proxy.DASHBOARD_PATH, usecols=["PitcherId", "Pitcher", "PitcherTeam"])
     roster = roster.drop_duplicates(["PitcherId", "PitcherTeam"]).rename(columns={"PitcherTeam": "Team"})
     resolved = risk_adjusted_value.resolve_contracts(roster[["PitcherId", "Pitcher"]].drop_duplicates("PitcherId"),
                                                      contract_status.load_salaries())
-    cols = ["PitcherId", "Salary", "SalarySource", "ControlSource", "StatusMismatch", "ContractStatus_est", "EstYearsControl"]
+    cols = ["PitcherId", "Salary", "SalarySource", "ControlSource", "StatusMismatch", "ContractEstimated",
+            "ContractValued", "ContractStatus_est", "EstYearsControl"]
     rows = roster.merge(resolved[cols], on="PitcherId", how="left")
     rows["Pitches2025"] = rows["PitcherId"].map(pitches_by_id).fillna(0).astype(int)
 
+    valued = rows["ContractValued"]
     problems = pd.DataFrame({
-        PROBLEM_NO_SALARY: rows["Salary"].isna(),
-        PROBLEM_NO_CONTROL: rows["ControlSource"] == PROBLEM_NO_CONTROL,
-        PROBLEM_MISMATCH: rows["StatusMismatch"].fillna(False).astype(bool),
+        PROBLEM_DEFAULT: rows["ContractEstimated"],
+        PROBLEM_MISMATCH: rows["StatusMismatch"],
+        PROBLEM_NO_SALARY: rows["Salary"].isna() & valued,
+        PROBLEM_NO_CONTROL: (rows["ControlSource"] == PROBLEM_NO_CONTROL) & valued,
     })
     rows["Problem"] = problems.apply(lambda r: "; ".join(r.index[r]), axis=1)
-    report = rows[rows["Problem"] != ""].sort_values(["Pitches2025", "Team"], ascending=[False, True])
+    rows["Fix"] = np.where(problems[[PROBLEM_NO_SALARY, PROBLEM_NO_CONTROL]].any(axis=1), FIX_NEEDS_DATA,
+                           np.where(rows["ContractEstimated"], FIX_DEFAULT, ""))
+    report = rows[rows["Fix"] != ""].sort_values(["Pitches2025", "Team"], ascending=[False, True])
     return report[REPORT_COLUMNS].reset_index(drop=True), rows
 
 
-def print_report_summary(report: pd.DataFrame, rows: pd.DataFrame, teams: list[str]):
-    exploded = report.assign(Problem=report["Problem"].str.split("; ")).explode("Problem", ignore_index=True)
-    counts = pd.crosstab(exploded["Team"], exploded["Problem"]).reindex(
-        index=teams, columns=[PROBLEM_NO_SALARY, PROBLEM_NO_CONTROL, PROBLEM_MISMATCH], fill_value=0)
-    counts["pitchers flagged"] = report.groupby("Team").size().reindex(teams, fill_value=0)
-    counts.loc["TOTAL"] = counts.sum()
-    print("\n── Missing contract data per team (pitcher x team rows; one pitcher can have several problems) ──")
-    print(counts.to_string())
-    print(f"{len(report)} flagged pitcher x team rows, {report['PitcherId'].nunique()} unique pitchers "
-          f"-> {REPORT_PATH}")
+def excluded_non_pitchers(teams: list[str]) -> pd.DataFrame:
+    """Team, PitcherId, Name, Position for everyone dropped from each roster as a position player."""
+    frames = []
+    for team in teams:
+        path = STATCAST_TEAM_DIR / f"statcast_team_{team}_{START_DATE}_{END_DATE}.parquet"
+        if path.exists():
+            ids = pd.read_parquet(path, columns=["pitcher"])["pitcher"].unique()
+            frames.append(fetch_positions(ids).assign(Team=team))
+    if not frames:
+        return pd.DataFrame(columns=["Team", "PitcherId", "Name", "Position"])
+    positions = pd.concat(frames, ignore_index=True)
+    out = positions[~positions["PositionCode"].isin(PITCHER_POSITION_CODES)]
+    return out.rename(columns={"PositionAbbrev": "Position"})[["Team", "PitcherId", "Name", "Position"]] \
+        .sort_values(["Team", "Name"]).reset_index(drop=True)
 
-    source = rows["SalarySource"].map({"hand": "salaries.csv", "league min": "league min default"}).fillna("no salary")
-    by_source = pd.crosstab(rows["Team"], source).reindex(
-        index=teams, columns=["salaries.csv", "league min default", "no salary"], fill_value=0)
-    by_source.loc["TOTAL"] = by_source.sum()
-    print("\n── Where each dashboard pitcher's 2025 Salary came from ──")
-    print(by_source.to_string())
+
+def print_report_summary(report: pd.DataFrame, rows: pd.DataFrame, excluded: pd.DataFrame, teams: list[str]):
+    source = rows["SalarySource"].map({
+        risk_adjusted_value.SALARY_SOURCE_CSV: "salaries.csv rows",
+        risk_adjusted_value.SALARY_SOURCE_PRE_ARB: "pre-arb minimum",
+        risk_adjusted_value.SALARY_SOURCE_DEFAULT: "default minimum",
+        risk_adjusted_value.SALARY_SOURCE_TWO_WAY: "two-way (not valued)",
+    }).fillna("needs data")
+    counts = pd.crosstab(rows["Team"], source).reindex(
+        index=teams, columns=["salaries.csv rows", "pre-arb minimum", "default minimum", "needs data", "two-way (not valued)"],
+        fill_value=0)
+    counts["excluded non-pitchers"] = excluded.groupby("Team").size().reindex(teams, fill_value=0)
+    counts.loc["TOTAL"] = counts.sum()
+    print("\n── 2025 contract source per team (dashboard pitchers; a traded pitcher counts for each team) ──")
+    print(counts.to_string())
+    by_fix = report["Fix"].value_counts()
+    print(f"\n{REPORT_PATH}: {len(report)} pitcher x team rows ({report['PitcherId'].nunique()} pitchers): "
+          f"{by_fix.get(FIX_DEFAULT, 0)} '{FIX_DEFAULT}', {by_fix.get(FIX_NEEDS_DATA, 0)} '{FIX_NEEDS_DATA}', "
+          f"{report['Problem'].str.contains('status mismatch').sum()} with a status mismatch")
 
 
 def print_file_sizes():
@@ -186,7 +217,8 @@ def run(teams: list[str]):
     value = runner.step("league", "risk_adjusted_value", risk_adjusted_value.grade_league)
 
     print("\n── 4. Team views + dashboard exports, per team ──")
-    league_pitches = pd.read_parquet(stuff_plus_proxy.LEAGUE_PITCHES_PATH) if stuff is not None else None
+    runner.step("league", "purge non-pitchers", stuff_plus_proxy.purge_non_pitchers_from_dashboard)
+    league_pitches = stuff_plus_proxy.build_league_scores() if stuff is not None else None
     for team in teams:
         if stuff is not None:
             runner.step(team, "stuff_plus_proxy", lambda t=team: stuff_plus_proxy.export_scope(
@@ -205,12 +237,19 @@ def run(teams: list[str]):
     pitches_by_id = league.groupby("pitcher").size()
     league = league_pitches = None   # free memory before the report
     result = runner.step("league", "missing contract report", build_missing_report, pitches_by_id)
+    excluded = excluded_non_pitchers(teams)
+    print(f"\n── {excluded['PitcherId'].nunique()} non-pitcher(s) excluded (primary position not P or two-way) ──")
+    print(excluded.to_string(index=False) if not excluded.empty else "none")
     if result is not None:
         report, rows = result
         report.to_csv(REPORT_PATH, index=False)
-        print_report_summary(report, rows, sorted(rows["Team"].unique()))
-        print(f"\n── Top 20 rows of {REPORT_PATH.name} ──")
-        print(report.head(20).to_string(index=False))
+        print_report_summary(report, rows, excluded, sorted(rows["Team"].unique()))
+        needs = report[report["Fix"] == FIX_NEEDS_DATA]
+        print(f"\n── {len(needs)} row(s) still marked '{FIX_NEEDS_DATA}' ──")
+        print(needs.to_string(index=False) if not needs.empty else "none")
+        default = report[report["Fix"] == FIX_DEFAULT].drop_duplicates("PitcherId")
+        print(f"\n── Top 20 pitchers by 2025 pitches on the default contract ({FIX_DEFAULT}) ──")
+        print(default.head(20).to_string(index=False))
     print_file_sizes()
 
     print(f"\nLogs: {LOG_DIR}/run_<TEAM>.txt, run_league.txt")

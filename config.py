@@ -25,6 +25,9 @@ INJURY_ARM_STINTS_FOR_MAX_RISK = 2  # arm IL stints over the lookback window tha
 # Contracts / multi-year surplus (ASSUMPTIONS -- used by risk_adjusted_value.py)
 LEAGUE_MIN_SALARY_BY_YEAR = {2025: 760_000, 2026: 780_000}  # later years = last known value
 LEAGUE_MIN_SALARY = LEAGUE_MIN_SALARY_BY_YEAR[SEASON]
+# Two-way players (MLBAM ids): pitching metrics are graded, but no surplus value is computed,
+# because the salary pays for hitting AND pitching (660271 = Shohei Ohtani)
+TWO_WAY_EXCLUDE_VALUE = [660271]
 ARB_PCT_OF_MARKET = [0.40, 0.60, 0.80, 0.80]  # arb year 1, 2, 3, 4 (Super Two), as share of WAR x $/WAR
 DOLLARS_PER_WAR_GROWTH = 0.05    # yearly inflation in $/WAR
 DISCOUNT_RATE = 0.08             # future seasons are worth less than this one

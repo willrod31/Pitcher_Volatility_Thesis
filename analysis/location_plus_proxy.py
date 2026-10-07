@@ -50,14 +50,14 @@ from sklearn.model_selection import GroupKFold
 from config import (
     END_DATE, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_FOR_SCALE, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, START_DATE,
 )
-from analysis.data_acquisition import filter_to_team, load_season_monthly, lookup_mlbam_id, primary_team
+from analysis.data_acquisition import filter_to_team, load_season_monthly, lookup_mlbam_id, pitchers_only, primary_team
 from analysis.stabilization import load_k, regress, reliability
-from analysis.utils import CACHE_DIR, scale_100
+from analysis.utils import LOCATION_PLUS_DIR, scale_100
 
-PITCHES_PATH = CACHE_DIR / "location_plus_pitches.parquet"
-SUMMARY_PATH = CACHE_DIR / "location_plus_summary.parquet"
-PITCHER_PATH = CACHE_DIR / "location_plus_pitcher.parquet"
-RELIABILITY_PATH = CACHE_DIR / "command_reliability.csv"
+PITCHES_PATH = LOCATION_PLUS_DIR / "location_plus_pitches.parquet"
+SUMMARY_PATH = LOCATION_PLUS_DIR / "location_plus_summary.parquet"
+PITCHER_PATH = LOCATION_PLUS_DIR / "location_plus_pitcher.parquet"
+RELIABILITY_PATH = LOCATION_PLUS_DIR / "command_reliability.csv"
 DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "dashboard" / "data" / "location_plus_pitch_types.csv"
 
 # release_speed/spin/extension/pfx are loaded ONLY because load_season_monthly's
@@ -148,7 +148,8 @@ def build_scored_pitches(force_refresh: bool = False) -> pd.DataFrame:
     """League-wide pitches with out-of-fold PredRunValue, cached (the slow step)."""
     if PITCHES_PATH.exists() and not force_refresh:
         print(f"Using cached out-of-fold predictions ({PITCHES_PATH.name}); --refresh to retrain")
-        return pd.read_parquet(PITCHES_PATH)
+        # pitchers_only: the cache may predate the position filter
+        return pitchers_only(pd.read_parquet(PITCHES_PATH), "PitcherId")
 
     print(f"Loading league-wide Statcast {START_DATE} to {END_DATE} (month by month)...")
     # force_refresh only retrains the models; the monthly Statcast pulls stay cached
