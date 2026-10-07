@@ -323,6 +323,13 @@ def run_injury_regression(starts_with_outcomes: pd.DataFrame):
 
 
 def run(team: str | None = None, force_refresh: bool = False):
+    season_volatility, units = grade_league(force_refresh=force_refresh)
+    show(season_volatility, team)
+    run_regressions(units)
+
+
+def grade_league(force_refresh: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """League-wide volatility table, saved to OUT_PATH. Returns (table, appearance units) -- units feed run_regressions()."""
     apps = build_appearances(force_refresh=force_refresh)
     team_by_id = primary_team_from_apps(apps)
     name_by_id = apps.drop_duplicates("PitcherId").set_index("PitcherId")["Pitcher"]
@@ -337,7 +344,11 @@ def run(team: str | None = None, force_refresh: bool = False):
     season_volatility.to_parquet(OUT_PATH, index=False)
     print(f"Saved {len(season_volatility)} league-wide rows to {OUT_PATH}")
     print(season_volatility.groupby(["VolatilityPath", "Qualified"]).size().to_string())
+    return season_volatility, units
 
+
+def show(season_volatility: pd.DataFrame, team: str | None = None):
+    """Print a team's pitchers (or the 20 most volatile league-wide)."""
     if team:
         shown = filter_to_team(season_volatility, team).sort_values("VolatilityPercentile", ascending=False)
         title = f"{team}, graded vs. league"
@@ -347,6 +358,9 @@ def run(team: str | None = None, force_refresh: bool = False):
     print(f"\n── Volatility ({title}) ──")
     print(shown.round(2).to_string(index=False))
 
+
+def run_regressions(units: pd.DataFrame):
+    """League-wide tests: does volatility predict next-outing results, and an IL stint soon after?"""
     trailing = compute_trailing_volatility(units)
     for path, path_units in trailing.groupby("VolatilityPath"):
         run_predictive_regression(path_units, label=path)

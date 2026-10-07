@@ -148,6 +148,11 @@ def compute_pitch_mix(df: pd.DataFrame, stuff_summary: pd.DataFrame) -> pd.DataF
 
 
 def run(team: str | None = None, force_refresh: bool = False):
+    show(grade_league(force_refresh=force_refresh), team)
+
+
+def grade_league(force_refresh: bool = False, df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """League-wide upside table, saved to OUT_PATH. Pass `df` (load_season_monthly with RAW_COLUMNS) to reuse a loaded frame."""
     for path, module in [(LOCATION_PITCHER_PATH, "location_plus_proxy"), (STUFF_PITCHER_PATH, "stuff_plus_proxy")]:
         if not path.exists():
             raise FileNotFoundError(f"{path} not found -- run `python -m analysis.{module}` first.")
@@ -155,8 +160,9 @@ def run(team: str | None = None, force_refresh: bool = False):
     stuff_pitcher = pd.read_parquet(STUFF_PITCHER_PATH)
     stuff_summary = pd.read_parquet(STUFF_SUMMARY_PATH)
 
-    print(f"Loading league-wide Statcast {START_DATE} to {END_DATE} (month by month)...")
-    df = load_season_monthly(START_DATE, END_DATE, columns=RAW_COLUMNS, force_refresh=force_refresh)
+    if df is None:
+        print(f"Loading league-wide Statcast {START_DATE} to {END_DATE} (month by month)...")
+        df = load_season_monthly(START_DATE, END_DATE, columns=RAW_COLUMNS, force_refresh=force_refresh)
     thrown = df.groupby("pitcher").size()
     qualified_ids = thrown[thrown >= MIN_PITCHES_FOR_INCLUSION].index
     df = df[df["pitcher"].isin(thrown[thrown >= MIN_PITCHES_TO_DISPLAY].index)]
@@ -190,7 +196,11 @@ def run(team: str | None = None, force_refresh: bool = False):
     # Always save the league-wide table -- downstream z-scores need the full pool.
     out.to_parquet(OUT_PATH, index=False)
     print(f"Saved {len(out)} league-wide rows ({out['Qualified'].sum()} qualified) to {OUT_PATH}")
+    return out
 
+
+def show(out: pd.DataFrame, team: str | None = None):
+    """Print a team's pitchers (or the league top 20), graded vs. the league."""
     shown = filter_to_team(out, team) if team else out[out["Qualified"]].head(20)
     cols = ["Pitcher", "PitcherTeam", "Qualified", "Pitches", "StuffPlus_Scaled", "StuffPlus_Scaled_Reg", COMMAND_COLUMN,
             COMMAND_COLUMN + "_Reg", "AsymmetricUpsideIndex", "AsymmetricUpsideIndex_Reg", "MostUsedPitch", "BestPitch"]

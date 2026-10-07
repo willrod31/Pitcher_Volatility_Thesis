@@ -6,6 +6,9 @@ This is the slow, network-dependent step -- every analysis script (Stuff+
 Proxy and the rest) works off the parquet files this writes, so re-running
 the pipeline for tweaks doesn't re-hit Statcast every time.
 """
+import functools
+import shutil
+
 import numpy as np
 import pandas as pd
 
@@ -112,9 +115,54 @@ def load_team_season(team: str, start_date: str = START_DATE, end_date: str = EN
     return df
 
 
+def seed_team_caches_from_league(teams, start_date: str = START_DATE, end_date: str = END_DATE) -> list[str]:
+    """Write fetch_statcast_team()'s cache for each of `teams` that has none, from the league monthly caches.
+
+    A team cache is the team's own-pitching rows, which is exactly the
+    league feed's rows where that team is fielding (confirmed identical for
+    PIT: same 22,590 rows, same 31 pitchers). Splitting the cached league
+    months avoids one pb.statcast(team=...) pull per team. Months are
+    processed one at a time and split into per-team part files, so memory
+    stays at one raw month. Returns the teams it wrote.
+    """
+    todo = [t for t in teams if not (CACHE_DIR / f"statcast_team_{t}_{start_date}_{end_date}.parquet").exists()]
+    if not todo:
+        return []
+    parts_dir = CACHE_DIR / "_team_parts"
+    parts_dir.mkdir(exist_ok=True)
+    try:
+        for n, (chunk_start, chunk_end) in enumerate(_month_chunks(start_date, end_date)):
+            raw = fetch_statcast(chunk_start, chunk_end)
+            fielding = np.where(raw["inning_topbot"] == "Top", raw["home_team"], raw["away_team"])
+            for team in todo:
+                raw[fielding == team].to_parquet(parts_dir / f"{team}_{n}.parquet", index=False)
+            del raw
+        for team in todo:
+            parts = sorted(parts_dir.glob(f"{team}_*.parquet"))
+            df = pd.concat([pd.read_parquet(f) for f in parts], ignore_index=True)
+            df.to_parquet(CACHE_DIR / f"statcast_team_{team}_{start_date}_{end_date}.parquet", index=False)
+    finally:
+        shutil.rmtree(parts_dir, ignore_errors=True)
+    return todo
+
+
 def team_roster_ids(team: str, start_date: str = START_DATE, end_date: str = END_DATE, force_refresh: bool = False) -> pd.DataFrame:
-    """PitcherId + Pitcher for everyone who threw for `team` at any point in this range."""
-    raw = fetch_statcast_team(team, start_date, end_date, force_refresh=force_refresh)
+    """PitcherId + Pitcher for everyone who threw for `team` at any point in this range.
+
+    Memoized per process (run_all.py asks for the same roster several times per team).
+    """
+    if force_refresh:
+        _team_roster_ids.cache_clear()
+    return _team_roster_ids(team, start_date, end_date, force_refresh).copy()
+
+
+@functools.lru_cache(maxsize=None)
+def _team_roster_ids(team: str, start_date: str, end_date: str, force_refresh: bool) -> pd.DataFrame:
+    cached = CACHE_DIR / f"statcast_team_{team}_{start_date}_{end_date}.parquet"
+    if cached.exists() and not force_refresh:
+        raw = pd.read_parquet(cached, columns=["pitcher"])   # only the ids are needed
+    else:
+        raw = fetch_statcast_team(team, start_date, end_date, force_refresh=force_refresh)
     named = attach_pitcher_names(raw[["pitcher"]].drop_duplicates())
     named = named.dropna(subset=["Pitcher"]).rename(columns={"pitcher": "PitcherId"})
     named["PitcherId"] = named["PitcherId"].astype(int)

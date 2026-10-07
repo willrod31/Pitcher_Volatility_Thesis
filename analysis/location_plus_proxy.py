@@ -325,7 +325,12 @@ def reliability_test(scored: pd.DataFrame) -> pd.DataFrame:
 def run(pitcher: str | None = None, team: str | None = None, force_refresh: bool = False):
     if pitcher and team:
         raise ValueError("Pass --pitcher or --team, not both")
+    pitcher_level = grade_league(force_refresh=force_refresh)
+    show(pitcher_level, pitcher=pitcher, team=team)
 
+
+def grade_league(force_refresh: bool = False) -> pd.DataFrame:
+    """League-wide Location+ tables + dashboard CSV + reliability table, saved. Returns the pitcher table."""
     scored = build_scored_pitches(force_refresh=force_refresh)
     by_type, pitcher_level = summarize_location_plus(scored)
     by_type.to_parquet(SUMMARY_PATH, index=False)
@@ -337,8 +342,11 @@ def run(pitcher: str | None = None, team: str | None = None, force_refresh: bool
     print("\n── Command reliability (odd/even split halves, qualified pitchers) ──")
     print(reliability_test(scored).round(3).to_string(index=False))
     print(f"Saved to {RELIABILITY_PATH}")
+    return pitcher_level
 
-    # grading above is always league-wide; --pitcher/--team only filter what's shown
+
+def show(pitcher_level: pd.DataFrame, pitcher: str | None = None, team: str | None = None):
+    """Print one pitcher / team / the league top 20 -- grading is always league-wide."""
     if team:
         shown, title = filter_to_team(pitcher_level, team), f"{team}, graded vs. league"
     elif pitcher:

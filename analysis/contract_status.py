@@ -31,6 +31,11 @@ OUT_PATH = CACHE_DIR / "contract_status_est.csv"
 SALARIES_PATH = CACHE_DIR / "salaries.csv"
 BATCH_SIZE = 100
 
+# data/salaries.csv columns, and what load_salaries() renames to avoid colliding
+# with pipeline columns (Team would shadow the Statcast team label).
+SALARY_RENAMES = {"Team": "SalariesTeam"}
+SALARY_FIELDS_CHECKED = ["Salary", "ContractStatus", "YearsControl", "PreArbYearsLeft", "ArbYearsLeft", "GuaranteedFuture"]
+
 PRE_ARB_YEARS = 3
 FULL_CONTROL_YEARS = 6
 
@@ -50,6 +55,58 @@ def status_group(status) -> str | None:
     if s in ("arb", "arbitration"):
         return "arb"
     return "FA-eligible"
+
+
+def load_salaries(verbose: bool = False) -> pd.DataFrame | None:
+    """data/salaries.csv for config.SEASON, one row per PitcherId (Int64), or None if there's no file.
+
+    - Blank PitcherId rows are dropped (listed when verbose) -- they can't be
+      joined to Statcast.
+    - Traded pitchers appear once per team; the LAST row per PitcherId is kept.
+      With verbose, any PitcherId whose rows disagree on Salary (or another
+      contract field) is printed so it can be fixed by hand.
+    - Team -> SalariesTeam and Pitcher/Season are dropped so the merge in
+      risk_adjusted_value.resolve_contracts never produces _x/_y columns.
+    """
+    if not SALARIES_PATH.exists():
+        if verbose:
+            print(f"No {SALARIES_PATH} found -- only pre-arb estimates (league minimum) will get a Salary.")
+        return None
+    raw = pd.read_csv(SALARIES_PATH)
+    if "Season" in raw:
+        raw = raw[raw["Season"].isna() | (raw["Season"] == SEASON)]
+
+    ids = pd.to_numeric(raw["PitcherId"], errors="coerce")
+    bad = raw[ids.isna() | (ids % 1 != 0)]
+    if verbose and not bad.empty:
+        print(f"Dropped {len(bad)} salaries.csv row(s) with a blank or non-integer PitcherId:")
+        print(bad[["PitcherId", "Pitcher", "Team"]].to_string(index=False))
+    raw = raw[ids.notna() & (ids % 1 == 0)].copy()
+    raw["PitcherId"] = ids[raw.index].astype("Int64")
+
+    if verbose:
+        report_duplicate_conflicts(raw)
+    salaries = raw.drop_duplicates("PitcherId", keep="last")
+    return salaries.drop(columns=["Pitcher", "Season"], errors="ignore").rename(columns=SALARY_RENAMES)
+
+
+def report_duplicate_conflicts(raw: pd.DataFrame) -> pd.DataFrame:
+    """Print PitcherIds listed more than once whose rows disagree on Salary / contract fields."""
+    dup = raw[raw["PitcherId"].duplicated(keep=False)]
+    fields = [c for c in SALARY_FIELDS_CHECKED if c in dup]
+    differs = dup.groupby("PitcherId")[fields].nunique(dropna=False) > 1
+    print(f"{dup['PitcherId'].nunique()} PitcherId(s) listed more than once in salaries.csv (traded midseason); "
+          f"the last row is kept.")
+    for field in fields:
+        ids = differs.index[differs[field]]
+        label = "Salary" if field == "Salary" else f"{field} (not Salary)"
+        print(f"  {len(ids)} with different {label} across their rows" + (":" if len(ids) else ""))
+        if len(ids):
+            rows = dup[dup["PitcherId"].isin(ids)].sort_values(["PitcherId"])
+            kept = rows.index.isin(rows.drop_duplicates("PitcherId", keep="last").index)
+            shown = rows[["PitcherId", "Pitcher", "Team", field]].assign(Kept=kept)
+            print("    " + shown.to_string(index=False).replace("\n", "\n    "))
+    return differs
 
 
 def fetch_debut_info(mlbam_ids, force_refresh: bool = False) -> dict[int, str | None]:
@@ -123,8 +180,9 @@ def run(pitcher: str | None = None, team: str | None = None, force_refresh: bool
     print(est.sort_values("EstYearsControl", ascending=False).to_string(index=False))
     save_estimates(est)
 
-    if SALARIES_PATH.exists():
-        diff = disagreements(est, pd.read_csv(SALARIES_PATH))
+    salaries = load_salaries()
+    if salaries is not None:
+        diff = disagreements(est, salaries)
         print(f"\n{len(diff)} pitcher(s) where the estimate disagrees with salaries.csv ContractStatus:")
         if not diff.empty:
             print(diff.to_string(index=False))

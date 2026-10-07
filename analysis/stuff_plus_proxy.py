@@ -57,12 +57,13 @@ PITCHES_PATH = CACHE_DIR / "stuff_plus_pitches.parquet"
 
 DASHBOARD_DATA = Path(__file__).resolve().parent.parent / "dashboard" / "data"
 DASHBOARD_PATH = DASHBOARD_DATA / "stuff_plus_pitch_types.csv"
-DASHBOARD_PITCHES_PATH = DASHBOARD_DATA / "stuff_plus_pitches.csv"
-# ALL pitches (not just scored swings) for the pitch movement chart
-MOVEMENT_PITCHES_PATH = DASHBOARD_DATA / "movement_pitches.csv"
+# The two per-pitch exports are gzipped: league-wide they're 30-60MB as plain CSV,
+# over the 25MB GitHub web limit (pandas reads/writes .csv.gz transparently).
+DASHBOARD_PITCHES_PATH = DASHBOARD_DATA / "stuff_plus_pitches.csv.gz"
+# ALL pitches (not just scored swings) for the pitch movement chart -- only the columns app.py reads
+MOVEMENT_PITCHES_PATH = DASHBOARD_DATA / "movement_pitches.csv.gz"
 MOVEMENT_COLUMNS = [
-    "PitcherId", "Pitcher", "PitcherTeam", "PitchType", "release_speed", "ivb", "hb",
-    "p_throws", "arm_angle", "ArmAngleSource", "release_pos_x", "release_pos_z", "release_extension",
+    "PitcherId", "PitchType", "release_speed", "ivb", "hb", "p_throws", "arm_angle", "ArmAngleSource",
 ]
 # Per-appearance primary fastball velocity, for the velocity-by-appearance chart
 VELOCITY_PATH = DASHBOARD_DATA / "velocity_by_game.csv"
@@ -85,6 +86,9 @@ RAW_TRAIN_COLUMNS = [
     "p_throws",   # handedness mirroring (to_rhp_frame)
     "arm_angle",  # not a model feature -- dashboard movement chart only
 ]
+# Training columns plus what the per-team velocity chart needs, so one
+# league-wide load can grade AND be sliced into each team's scope (run_all.py).
+SCOPE_COLUMNS = RAW_TRAIN_COLUMNS + ["game_pk", "game_date"]
 
 # Model features -- same shape features the original Trackman-based script
 # used (RelSpeed, InducedVertBreak, HorzBreak, SpinRate, SpinAxis, Extension,
@@ -372,13 +376,16 @@ def v1_tables(train_df: pd.DataFrame, force_refresh: bool = False) -> tuple[pd.D
 
 # ── League grading ───────────────────────────────────────────────────────────
 
-def grade_league(force_refresh: bool = False) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def grade_league(force_refresh: bool = False, train_df: pd.DataFrame | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """League-wide (pitcher x pitch type, pitcher) Stuff+ tables, saved; plus the training frame.
 
     One row per PitcherId (traded pitchers labeled with their primary team).
+    Pass `train_df` (load_season_monthly with at least RAW_TRAIN_COLUMNS) to
+    reuse a frame that's already loaded.
     """
-    print(f"Pulling a league-wide training sample {TRAIN_START} to {TRAIN_END} (month by month)...")
-    train_df = load_season_monthly(TRAIN_START, TRAIN_END, columns=RAW_TRAIN_COLUMNS)
+    if train_df is None:
+        print(f"Pulling a league-wide training sample {TRAIN_START} to {TRAIN_END} (month by month)...")
+        train_df = load_season_monthly(TRAIN_START, TRAIN_END, columns=RAW_TRAIN_COLUMNS)
     print(f"Loaded {len(train_df)} cleaned training pitches")
 
     league_pitches = build_league_scores(train_df, force_refresh=force_refresh)
@@ -424,8 +431,9 @@ def save_for_dashboard(summary: pd.DataFrame, pitcher_level: pd.DataFrame):
     """Upsert this run's per-pitch-type Stuff+ rows (plus each pitcher's overall) into the dashboard's CSV.
 
     Graded against the league-wide qualified pool, so 100 is a league
-    average, not this subset's own. Upserted by PitcherId, so re-running for a
-    pitcher or team replaces just their old rows.
+    average, not this subset's own. Upserted by PitcherId x PitcherTeam, so a
+    traded pitcher keeps a row under each team he was run for, and re-running
+    a team replaces just that team's rows for those pitchers.
     """
     overall = pitcher_level[[
         "PitcherId", "PitchesThrown", "Pitches", "Swings", "StuffPlus", "StuffPlus_Scaled", "StuffPlus_Scaled_Reg",
@@ -437,16 +445,18 @@ def save_for_dashboard(summary: pd.DataFrame, pitcher_level: pd.DataFrame):
         "PitchesThrown", "OverallPitches", "OverallSwings", "OverallStuffPlus", "OverallStuffPlus_Scaled",
         "OverallStuffPlus_Scaled_Reg", "OverallStuffPlus_Reliability", "OverallStuffPlus_v1", "OverallStuffPlus_Scaled_v1",
     ]]
-    upsert_csv(rows, DASHBOARD_PATH)
+    upsert_csv(rows, DASHBOARD_PATH, keys=["PitcherId", "PitcherTeam"])
 
 
-def upsert_csv(rows: pd.DataFrame, path: Path):
-    """Replace this run's PitcherIds in `path`, keep everyone else."""
+def upsert_csv(rows: pd.DataFrame, path: Path, keys: list[str] | None = None):
+    """Replace this run's `keys` (default PitcherId) in `path`, keep everyone else."""
+    keys = keys or ["PitcherId"]
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         existing = pd.read_csv(path)
-        if "PitcherId" in existing:
-            existing = existing[~existing["PitcherId"].isin(rows["PitcherId"].unique())]
+        if set(keys) <= set(existing.columns):
+            replaced = pd.MultiIndex.from_frame(existing[keys]).isin(pd.MultiIndex.from_frame(rows[keys].drop_duplicates()))
+            existing = existing[~replaced]
         rows = pd.concat([existing, rows], ignore_index=True)
     rows.to_csv(path, index=False)
     print(f"Saved {len(rows)} row(s) to {path}")
@@ -454,8 +464,8 @@ def upsert_csv(rows: pd.DataFrame, path: Path):
 
 def save_pitches_for_dashboard(per_pitch: pd.DataFrame):
     """Upsert this run's scored pitches (per-pitch StuffPlus)."""
-    upsert_csv(per_pitch[["Pitcher", "PitcherId", "PitcherTeam", "PitchType", "release_speed", "ivb", "hb", "StuffPlus"]],
-               DASHBOARD_PITCHES_PATH)
+    rows = per_pitch[["Pitcher", "PitcherId", "PitcherTeam", "PitchType", "release_speed", "ivb", "hb", "StuffPlus"]]
+    upsert_csv(rows.round({"ivb": 2, "hb": 2, "StuffPlus": 1}), DASHBOARD_PITCHES_PATH)
 
 
 def estimate_arm_angle(df: pd.DataFrame) -> pd.Series:
@@ -482,7 +492,7 @@ def save_movement_for_dashboard(scope_df: pd.DataFrame):
     has_statcast = rows.groupby("PitcherId")["arm_angle"].transform(lambda s: s.notna().any())
     rows["ArmAngleSource"] = np.where(has_statcast, "Statcast", "release-point estimate")
     rows.loc[~has_statcast, "arm_angle"] = estimate_arm_angle(rows.loc[~has_statcast])
-    upsert_csv(rows[MOVEMENT_COLUMNS], MOVEMENT_PITCHES_PATH)
+    upsert_csv(rows[MOVEMENT_COLUMNS].round({"ivb": 2, "hb": 2, "arm_angle": 1}), MOVEMENT_PITCHES_PATH)
 
 
 def primary_fastball(pitch_types: pd.Series) -> str | None:
@@ -537,6 +547,7 @@ def run(start_date: str, end_date: str, pitcher: str | None = None, team: str | 
 
     # Grades are league-wide and out-of-fold; the scope pull decides WHO is shown
     # and feeds the movement / velocity charts.
+    del train_df
     if pitcher:
         print(f"\nPulling {pitcher}'s Statcast data {start_date} to {end_date}...")
         scope_df = load_pitcher_season(pitcher, start_date, end_date, force_refresh=force_refresh)
@@ -546,19 +557,30 @@ def run(start_date: str, end_date: str, pitcher: str | None = None, team: str | 
               f"(including time with other teams if traded)...")
         scope_df = load_team_roster_full_seasons(team, start_date, end_date, force_refresh=force_refresh)
         label = team
+    export_scope(summary, pitcher_level, scope_df, label, pitcher or team)
+
+
+def export_scope(summary: pd.DataFrame, pitcher_level: pd.DataFrame, scope_df: pd.DataFrame, label: str, title: str,
+                 league_pitches: pd.DataFrame | None = None):
+    """Print the scope's staff (graded vs. league) and upsert its rows into every dashboard CSV.
+
+    scope_df = every pitch the scope's pitchers threw (cleaned Statcast);
+    label = the PitcherTeam written for them. league_pitches defaults to
+    the cached LEAGUE_PITCHES_PATH (pass it in to avoid re-reading it per team).
+    """
     print(f"Loaded {len(scope_df)} cleaned pitches")
     ids = scope_df["pitcher"].unique()
 
     scope_summary = summary[summary["PitcherId"].isin(ids)].assign(PitcherTeam=label)
     scope_pitcher = pitcher_level[pitcher_level["PitcherId"].isin(ids)].assign(PitcherTeam=label)
-    per_pitch = pd.read_parquet(LEAGUE_PITCHES_PATH)
+    per_pitch = league_pitches if league_pitches is not None else pd.read_parquet(LEAGUE_PITCHES_PATH)
     per_pitch = per_pitch[per_pitch["PitcherId"].isin(ids)].assign(PitcherTeam=label)
     if scope_pitcher.empty:
-        raise ValueError(f"'{pitcher or team}' not found in the league Stuff+ table")
+        raise ValueError(f"'{title}' not found in the league Stuff+ table")
     scope_summary.to_parquet(SUMMARY_PATH, index=False)
     per_pitch.to_parquet(PITCHES_PATH, index=False)
 
-    print(f"\n── {pitcher or team} pitching staff (graded vs. league) ──")
+    print(f"\n── {title} pitching staff (graded vs. league) ──")
     print(scope_pitcher.sort_values("StuffPlus_Scaled_Reg", ascending=False).drop(columns="PitcherId").to_string(index=False))
     save_for_dashboard(scope_summary, scope_pitcher)
     save_pitches_for_dashboard(per_pitch)

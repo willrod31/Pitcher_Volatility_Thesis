@@ -22,8 +22,8 @@ st.set_page_config(
 
 DATA_DIR = Path(__file__).parent / "data"
 STUFF_PLUS_SUMMARY_PATH = DATA_DIR / "stuff_plus_pitch_types.csv"
-STUFF_PLUS_PITCHES_PATH = DATA_DIR / "stuff_plus_pitches.csv"
-MOVEMENT_PITCHES_PATH = DATA_DIR / "movement_pitches.csv"   # every pitch, for the movement chart
+STUFF_PLUS_PITCHES_PATH = DATA_DIR / "stuff_plus_pitches.csv.gz"
+MOVEMENT_PITCHES_PATH = DATA_DIR / "movement_pitches.csv.gz"   # every pitch, for the movement chart
 LOCATION_PLUS_PATH = DATA_DIR / "location_plus_pitch_types.csv"  # from analysis/location_plus_proxy.py
 REPORT_PATH = DATA_DIR / "pitcher_report_data.csv"          # from analysis/export_report_data.py
 SURPLUS_BY_YEAR_PATH = DATA_DIR / "surplus_by_year.csv"     # from analysis/export_report_data.py
@@ -99,7 +99,7 @@ BASELINE_COLOR = "#8A8F98"    # the 100 reference line
 
 def data_version() -> float:
     """Newest modification time in dashboard/data -- part of each loader's cache key, so a re-export is picked up."""
-    return max((f.stat().st_mtime for f in DATA_DIR.glob("*.csv")), default=0.0)
+    return max((f.stat().st_mtime for f in DATA_DIR.glob("*.csv*")), default=0.0)
 
 
 @st.cache_data
@@ -495,10 +495,11 @@ team_choice, team_name_choice = team_options[team_labels.index(team_label_choice
 
 st.sidebar.image(team_logo_url(team_choice), width=120)
 
-team_pitchers = (
-    sorted(stuff_plus_summary.loc[stuff_plus_summary["PitcherTeam"] == team_choice, "Pitcher"].unique())
-    if stuff_plus_summary is not None else []
+# one row per pitcher x team x pitch type: a traded pitcher is listed under each team he pitched for
+team_stuff = (
+    stuff_plus_summary[stuff_plus_summary["PitcherTeam"] == team_choice] if stuff_plus_summary is not None else pd.DataFrame()
 )
+team_pitchers = sorted(team_stuff["Pitcher"].unique()) if not team_stuff.empty else []
 
 if team_pitchers:
     pitcher_choice = st.sidebar.selectbox("Pitcher", team_pitchers)
@@ -527,7 +528,7 @@ with tab_report:
         st.subheader(f"{team_name_choice} ({team_choice})")
         st.info(f"No data loaded for this team yet ({team_name_choice}). Pick a team with data loaded (e.g. Pittsburgh Pirates) from the sidebar.")
     else:
-        pitcher_id = int(stuff_plus_summary.loc[stuff_plus_summary["Pitcher"] == pitcher_choice, "PitcherId"].iloc[0])
+        pitcher_id = int(team_stuff.loc[team_stuff["Pitcher"] == pitcher_choice, "PitcherId"].iloc[0])
 
         photo_col, logo_col, text_col = st.columns([1, 1, 4])
         with photo_col:
@@ -538,7 +539,7 @@ with tab_report:
             st.subheader(pitcher_choice)
             st.caption(team_name_choice)
 
-        pitcher_stuff_rows = stuff_plus_summary[stuff_plus_summary["PitcherId"] == pitcher_id]
+        pitcher_stuff_rows = team_stuff[team_stuff["PitcherId"] == pitcher_id]
         stuff_overall = pitcher_stuff_rows.iloc[0]
         pitcher_location_rows = (
             location_plus[location_plus["PitcherId"] == pitcher_id] if location_plus is not None else None
@@ -620,7 +621,7 @@ with tab_report:
             st.plotly_chart(surplus_by_year_chart(pitcher_years, chart_pools), width='stretch')
 
         pitcher_pitches = stuff_plus_pitches[stuff_plus_pitches["PitcherId"] == pitcher_id]
-        pitcher_summary = stuff_plus_summary[stuff_plus_summary["Pitcher"] == pitcher_choice]
+        pitcher_summary = pitcher_stuff_rows
 
         left, right = st.columns(2)
         with left:
@@ -724,7 +725,7 @@ with tab_board:
         )
     else:
         team_ids = (
-            stuff_plus_summary.loc[stuff_plus_summary["PitcherTeam"] == team_choice]
+            team_stuff
             .drop_duplicates("PitcherId")
             .rename(columns={"OverallStuffPlus_Scaled_Reg": "StuffScaled", "OverallStuffPlus_Reliability": "StuffReliability"})
             [["PitcherId", "Pitcher", "PitchesThrown", "StuffScaled", "StuffReliability"]]

@@ -59,7 +59,7 @@ from config import (
 )
 from analysis.asymmetric_upside import COMMAND_COLUMN, COMMAND_COLUMN_USED, OUT_PATH as UPSIDE_PATH, STUFF_COLUMN_USED
 from analysis.data_acquisition import filter_to_team, team_roster_ids
-from analysis.contract_status import SALARIES_PATH, estimate_contract_status, save_estimates, status_group
+from analysis.contract_status import estimate_contract_status, load_salaries, save_estimates, status_group
 from analysis.injury_history import SUMMARY_PATH as INJURY_SUMMARY_PATH
 from analysis.volatility_discount import OUT_PATH as VOLATILITY_PATH
 from analysis.utils import CACHE_DIR, zscore_vs
@@ -75,16 +75,6 @@ def league_min_salary(year: int) -> int:
     """LEAGUE_MIN_SALARY_BY_YEAR, carrying the last known value forward."""
     known = [y for y in LEAGUE_MIN_SALARY_BY_YEAR if y <= year]
     return LEAGUE_MIN_SALARY_BY_YEAR[max(known) if known else min(LEAGUE_MIN_SALARY_BY_YEAR)]
-
-
-def load_salaries() -> pd.DataFrame | None:
-    if not SALARIES_PATH.exists():
-        print(f"No {SALARIES_PATH} found -- only pre-arb estimates (league minimum) will get a Salary.")
-        return None
-    salaries = pd.read_csv(SALARIES_PATH)
-    if "Season" in salaries:
-        salaries = salaries[salaries["Season"].isna() | (salaries["Season"] == SEASON)]
-    return salaries.drop(columns=["Pitcher", "Season"], errors="ignore").drop_duplicates("PitcherId", keep="last")
 
 
 def load_injury_summary() -> pd.DataFrame | None:
@@ -148,6 +138,9 @@ def resolve_contracts(merged: pd.DataFrame, salaries: pd.DataFrame | None) -> pd
 
     merged["InSalariesCsv"] = merged["PitcherId"].isin(salaries["PitcherId"]) if salaries is not None else False
     if salaries is not None:
+        overlap = (set(salaries.columns) & set(merged.columns)) - {"PitcherId"}
+        if overlap:
+            raise ValueError(f"salaries.csv columns collide with pipeline columns: {sorted(overlap)}")
         merged = merged.merge(salaries, on="PitcherId", how="left")
     for col in ["Salary", "AAV", "GuaranteedFuture", *CONTRACT_FIELDS]:
         if col not in merged:
@@ -280,6 +273,11 @@ def report_flags(scope: pd.DataFrame):
 
 
 def run(team: str | None = None):
+    show(grade_league(), team)
+
+
+def grade_league() -> pd.DataFrame:
+    """League-wide risk-adjusted value + multi-year surplus, saved to OUT_PATH / SURPLUS_BY_YEAR_PATH."""
     for path, module in [(UPSIDE_PATH, "asymmetric_upside"), (VOLATILITY_PATH, "volatility_discount")]:
         if not path.exists():
             raise FileNotFoundError(f"{path} not found -- run `python -m analysis.{module}` first.")
@@ -302,7 +300,7 @@ def run(team: str | None = None):
     merged = compute_projected_war(merged)
     merged = apply_risk_shrinkage(merged)
 
-    merged = resolve_contracts(merged, load_salaries())
+    merged = resolve_contracts(merged, load_salaries(verbose=True))
     merged, by_year = add_multi_year_surplus(merged)
 
     merged = merged.sort_values("MultiYearSurplus", ascending=False, na_position="last")
@@ -310,7 +308,11 @@ def run(team: str | None = None):
     by_year.to_csv(SURPLUS_BY_YEAR_PATH, index=False)
     print(f"Saved {len(merged)} league-wide rows to {OUT_PATH}")
     print(f"Saved {len(by_year)} pitcher-season rows to {SURPLUS_BY_YEAR_PATH}")
+    return merged
 
+
+def show(merged: pd.DataFrame, team: str | None = None):
+    """Print a team's ranking (or the league top 20) plus contract-data flags."""
     scope = filter_to_team(merged, team) if team else merged[merged["MultiYearSurplus"].notna()].head(20)
     cols = [
         "Pitcher", "PitcherTeam", "Qualified", STUFF_COLUMN_USED, COMMAND_COLUMN_USED, "VolatilityPath", VOLATILITY_PERCENTILE_USED,

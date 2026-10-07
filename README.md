@@ -36,14 +36,15 @@ pitcher-volatility-thesis/
 │   ├── contract_status.py       # estimated contract status / years of control from MLB debut dates
 │   ├── risk_adjusted_value.py   # risk-adjusted WAR proxy + $ surplus value ranking
 │   ├── export_report_data.py    # joins all analysis output into one CSV for the dashboard
+│   ├── run_all.py               # whole pipeline for all 30 teams + missing-contract report
 │   └── utils.py
 └── dashboard/
     ├── app.py                   # Streamlit dashboard
     ├── requirements.txt         # dashboard-only deps (what Streamlit Cloud installs)
     └── data/                    # exports the analysis scripts hand off to app.py (committed; the deployed app reads these)
         ├── stuff_plus_pitch_types.csv   # from stuff_plus_proxy.py --pitcher
-        ├── stuff_plus_pitches.csv       # from stuff_plus_proxy.py --pitcher (scored swings, with per-pitch StuffPlus)
-        ├── movement_pitches.csv         # from stuff_plus_proxy.py --pitcher/--team (every pitch + arm angle, for the movement chart)
+        ├── stuff_plus_pitches.csv.gz    # from stuff_plus_proxy.py --pitcher (scored swings, with per-pitch StuffPlus; gzipped)
+        ├── movement_pitches.csv.gz      # from stuff_plus_proxy.py --pitcher/--team (every pitch + arm angle, for the movement chart; gzipped)
         ├── location_plus_pitch_types.csv # from location_plus_proxy.py (league-wide)
         ├── pitcher_report_data.csv      # from export_report_data.py (team value board + pitcher metrics)
         ├── surplus_by_year.csv          # from export_report_data.py (surplus by control year chart)
@@ -74,6 +75,33 @@ asymmetric_upside.py, volatility_discount.py and risk_adjusted_value.py always g
     python -m analysis.risk_adjusted_value --team PIT
     python -m analysis.export_report_data
 
+### Run every team at once
+
+    python -m analysis.run_all                  # all 30 teams
+    python -m analysis.run_all --teams PIT,LAD  # a subset (Statcast codes; ARI is accepted for AZ)
+
+run_all.py runs the same modules for every team but trains and grades the league only once:
+
+1. Each team's roster cache (data/statcast_team_<TEAM>_*.parquet) is split out of the cached league monthly pulls instead of one Statcast pull per team (identical to the per-team pull; checked on PIT).
+2. injury_history and contract_status run for every team first, since volatility and risk-adjusted value use every team's IL history.
+3. The league season is loaded month by month once (peak ~1.2GB on the PIT test, fine on 8GB) and shared by Stuff+, the Stuff+ dashboard exports and asymmetric_upside. Stuff+ and Location+ reuse their cached out-of-fold scores, then upside, volatility and risk-adjusted value are graded league-wide.
+4. Per team: each module's team view and the Stuff+ dashboard exports. Each roster pitcher's full season (any team) is taken from the shared league frame by PitcherId, not pulled by name.
+5. export_report_data runs once, then the missing-contract report is written (below).
+
+Each team's console output goes to logs/run_<TEAM>.txt and the league steps to logs/run_league.txt (logs/ is gitignored). If a step fails, its traceback goes to that log, the run continues, and every failure is listed at the end.
+
+A traded pitcher is listed under every team he pitched for in stuff_plus_pitch_types.csv (keyed on PitcherId x PitcherTeam), graded on his whole season under each.
+
+### Missing-contract report
+
+run_all.py writes data/missing_contract_report.csv: one row per pitcher x 2025 team shown in the dashboard whose contract data has a gap:
+
+- `no salary`: no Salary after all fallbacks (not in salaries.csv and not estimated pre-arb), so there's no surplus value.
+- `missing (1 yr assumed)`: no YearsControl in salaries.csv, and the debut-date estimate gives 0 years or none (usually veterans not in salaries.csv).
+- `status mismatch`: the salaries.csv ContractStatus disagrees with the debut-date estimate. Often the estimate is the one that's wrong (see contract_status.py), so this is a list to double-check, not a list of errors.
+
+Columns: PitcherId, Pitcher, Team, Problem (several are joined with "; "), ContractStatus_est, EstYearsControl, Pitches2025 (cleaned Statcast pitches, all teams). Sorted by Pitches2025, so the gaps that matter most come first. The run also prints per-team counts of each problem, and how many pitchers per team got their 2025 Salary from salaries.csv vs. the league-minimum default. Fix gaps by adding rows to data/salaries.csv and re-running.
+
 injury_history.py — IL history. Pulls each pitcher's transactions from the MLB Stats API and builds one row per IL stint (data/injury_stints.csv) and one per pitcher (data/injury_summary.csv). volatility_discount.py joins the summary and also tests whether volatility predicts an IL stint in the next 30 days.
 
     python -m analysis.injury_history --pitcher "Paul Skenes"
@@ -81,7 +109,7 @@ injury_history.py — IL history. Pulls each pitcher's transactions from the MLB
 
 contract_status.py — estimates ContractStatus (pre-arb / arb / FA-eligible) and years of control from each pitcher's mlbDebutDate (MLB Stats API /people), writes data/contract_status_est.csv, and flags pitchers where the estimate disagrees with data/salaries.csv. EstServiceYears is SEASON minus debut year -- an approximation that ignores option years, IL, partial seasons and Super Two.
 
-risk_adjusted_value.py — Risk-Adjusted Value Projection. Combines the upside index, volatility metric and IL history into a projected WAR proxy, shrunk toward replacement level as volatility and injury risk increase. Joins the hand-collected data/salaries.csv on PitcherId (blank contract fields fall back to contract_status.py's estimate; blank pre-arb salaries get the league minimum). Ranks pitchers by MultiYearSurplus: discounted surplus over each remaining year of team control (year-by-year table in data/surplus_by_year.csv). SurplusCurrentSeason keeps the old single-season number for comparison.
+risk_adjusted_value.py — Risk-Adjusted Value Projection. Combines the upside index, volatility metric and IL history into a projected WAR proxy, shrunk toward replacement level as volatility and injury risk increase. Joins data/salaries.csv on PitcherId (blank contract fields fall back to contract_status.py's estimate; blank pre-arb salaries get the league minimum). Ranks pitchers by MultiYearSurplus: discounted surplus over each remaining year of team control (year-by-year table in data/surplus_by_year.csv). SurplusCurrentSeason keeps the old single-season number for comparison.
 
 export_report_data.py — joins all four scripts' output into the one CSV the dashboard reads.
 
@@ -115,7 +143,7 @@ their *entire* season -- including time with another team if they were
 traded mid-year, not just their innings on this roster (a pitcher shown
 under a team here is graded on their whole season, labeled with that team,
 per data_acquisition.load_team_roster_full_seasons()). Either way it writes
-dashboard/data/stuff_plus_pitch_types.csv and stuff_plus_pitches.csv, which
+dashboard/data/stuff_plus_pitch_types.csv and stuff_plus_pitches.csv.gz, which
 dashboard/app.py reads directly -- --team just writes more rows to them at
 once. `--pitcher` and `--team` upsert independently, so you can build up
 coverage team by team without re-running ones you've already done.
@@ -204,7 +232,7 @@ streamlit run dashboard/app.py
 
 The public app on Streamlit Community Cloud runs from GitHub and only sees committed files. It reads nothing from data/ (gitignored raw caches), only the CSVs in dashboard/data/.
 
-1. Rerun the analysis scripts locally (run order above, ending with `python -m analysis.export_report_data`).
+1. Rerun the analysis scripts locally: `python -m analysis.run_all` (or the per-team run order above, ending with `python -m analysis.export_report_data`). run_all prints every dashboard/data/ file's size and flags anything over 25MB (GitHub's web upload limit). The two per-pitch files are written as .csv.gz for that reason, and the movement file keeps only the columns app.py reads.
 2. Commit the updated files: `git add dashboard/data/ && git commit -m "Refresh dashboard data"`.
 3. Push. Streamlit Cloud redeploys automatically.
 
@@ -212,10 +240,12 @@ The Pitcher Report has a fastball velocity by appearance chart: average primary-
 
 The Team Value Board tab ranks the selected team by multi-year surplus (Stuff+, risk-adjusted WAR, 2025 salary, years of control) with a WAR vs. salary scatter (point size = years of control, color = multi-year surplus). The Pitcher Report shows that pitcher's surplus by control year. Both need export_report_data.py to have been run.
 
-The sidebar lets you navigate every MLB team in both leagues. Picking a team
-with no Stuff+ data loaded says so; picking the Pittsburgh Pirates (after
-running the --team command above) lists their real 2025 pitching staff, each
-with real Stuff+ Proxy results. There's no sample/placeholder data mode
+The sidebar lets you navigate every MLB team in both leagues. After
+`python -m analysis.run_all`, every team lists its real 2025 pitching staff,
+each with real Stuff+ Proxy results. Picking a team that hasn't been run says
+so. STL loads without any salaries.csv rows: pre-arb pitchers get the league
+minimum, and everyone else shows n/a surplus and is listed in
+data/missing_contract_report.csv. There's no sample/placeholder data mode
 anymore -- everything the dashboard shows is real, or explicitly says it
 hasn't been run yet.
 
@@ -230,7 +260,7 @@ risk of that for stuff_plus_proxy.py).
 - A full league-wide season pull in one `load_season()` call can OOM on a memory-limited machine during pybaseball's concat step -- confirmed on an 8GB box around the 6-month mark. `load_season_monthly()` works around this (see above) and is used by every league-wide step, including stuff_plus_proxy.py with no flags.
 - Stuff+ Proxy is a gradient-boosted classifier on shape features, not a full replacement for proprietary gradient-boosted Stuff+ models. Out of fold it ranks whiffs only weakly (AUC 0.51 to 0.59) and is over-confident on new pitchers for most pitch types (see "Stuff+ v2"). Extreme release points (e.g. Tyler Rogers) are extrapolated and can get implausible grades.
 - IL history comes from the MLB Stats API transactions feed (analysis/injury_history.py), not manual collection anymore. The feed occasionally leaves out an activation, so when one's missing the return date is taken from the pitcher's first MLB appearance after the placement. Only pitchers you've run it for (--team/--pitcher) have injury data; everyone else gets 0 injury risk in risk_adjusted_value.py (InjuryDataPulled = False).
-- Salaries are hand-collected in data/salaries.csv (not scriptable). Contract status and years of control can be estimated from debut dates (contract_status.py), but EstServiceYears is SEASON minus debut year: it ignores option years, IL, partial seasons and Super Two, so hand-entered values always win.
+- Salaries come from data/salaries.csv, built by hand (not scraped) from saved FanGraphs RosterResource 2025 payroll pages for 29 teams (536 rows; PIT and LAD hand-checked; STL not included yet, so STL pitchers get only the pre-arb league-minimum default and show up in the missing-contract report). Columns: PitcherId, Pitcher, Team, Season, Salary, AAV, ContractStatus, YearsControl, PreArbYearsLeft, ArbYearsLeft, GuaranteedFuture, plus reference columns the pipeline carries but doesn't use (TeamPaid2025, Origin, Source, Notes, FanGraphsId, ServiceTime). Team is a FanGraphs code (ARI, not AZ), renamed SalariesTeam on load. contract_status.load_salaries() drops rows with a blank PitcherId and reads it as an integer. A pitcher traded midseason has one row per team; the last row is kept, and any whose rows disagree on Salary or contract fields are printed on every run. Contract status and years of control can be estimated from debut dates (contract_status.py), but EstServiceYears is SEASON minus debut year: it ignores option years, IL, partial seasons and Super Two, so hand-entered values always win.
 - simple_projected_war in risk_adjusted_value.py is an uncalibrated placeholder until regressed against actual historical WAR for a training sample. It uses the same starter-based WAR anchor for relievers, so reliever WAR is overstated.
 - Multi-year surplus holds ProjectedWAR flat across every control year (no aging curve yet), and the arb salary percentages, $/WAR growth, discount rate, injury shrinkage and control-year cap in config.py are assumptions, not fitted values.
 - Pitchers under config.MIN_PITCHES_FOR_INCLUSION (500) pitches now get regressed values (down to config.MIN_PITCHES_TO_DISPLAY = 50) and a risk-adjusted value, but the WAR proxy has no playing-time term: a 150-pitch reliever regressed to league-average talent still projects near LEAGUE_AVG_STARTER_WAR, so small-sample surplus values are overstated even more than qualified relievers'. The k values are fit once on 2025 qualified pitchers and assumed to hold for everyone.
