@@ -2,11 +2,13 @@
 import sys
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(1, str(Path(__file__).parent.parent))
 from colors import legend_html  # noqa: E402
+from pitch_types import PITCH_TYPE_ABBR, pitch_name  # noqa: E402
 from config import (  # noqa: E402
     DISCOUNT_RATE, DOLLARS_PER_WAR, DOLLARS_PER_WAR_GROWTH, INJURY_LOOKBACK_SEASONS, INJURY_SHRINKAGE, MAX_CONTROL_YEARS,
     MIN_PITCHES_DASHBOARD, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_TO_DISPLAY, SEASON, VOLATILITY_SHRINKAGE,
@@ -142,6 +144,13 @@ What the pitcher is worth minus what he's paid, added up over every remaining ye
 A big positive number means cheap production with years of control left, which is what a low-payroll team wants.
 """
     )
+
+st.header("Pitch abbreviations")
+st.markdown("Charts label pitches with these standard abbreviations. Hover a pitch on any chart to see its full name.")
+st.dataframe(
+    pd.DataFrame({"Abbreviation": list(PITCH_TYPE_ABBR.values()), "Pitch": [pitch_name(c) for c in PITCH_TYPE_ABBR]}),
+    hide_index=True, width=360,
+)
 
 st.header("Small samples")
 st.markdown(

@@ -12,6 +12,8 @@ color's z is multiplied by the value's Reliability (n / (n + k)), so a
 low-sample number stays closer to gray. League mean/SD/percentile pools come
 from QUALIFIED pitchers only (the report's Qualified column).
 """
+from html import escape
+
 import numpy as np
 import pandas as pd
 
@@ -160,17 +162,21 @@ SMALL_SAMPLE_TAG = (
 
 
 def stat_html(label: str, value_text: str, color: str | None, percentile: float | None,
-              sample_text: str | None = None, hover: str | None = None, small_sample: bool = False) -> str:
+              sample_text: str | None = None, hover: str | None = None, small_sample: bool = False,
+              help: str | None = None) -> str:
     """Stat card: label, the number in its good/bad color (+ sample size), league percentile underneath.
 
     hover: tooltip text (e.g. the raw, unregressed value). small_sample adds the "small" tag.
+    help: what the stat means, shown on hover over a (?) next to the label (like st.metric's help=).
     """
     pct = f"{ordinal(percentile)} pct" if percentile is not None else "&nbsp;"
     sample = f'<span style="font-size:0.85rem;font-weight:400;opacity:0.7;"> ({sample_text})</span>' if sample_text else ""
-    title = f' title="{hover}"' if hover else ""
+    title = f' title="{escape(hover)}"' if hover else ""
+    help_icon = (f' <span title="{escape(help)}" style="cursor:help;opacity:0.8;border:1px solid currentColor;'
+                 'border-radius:50%;padding:0 4px;font-size:0.7rem;">?</span>') if help else ""
     return (
         f'<div style="padding:4px 0 10px 0;"{title}>'
-        f'<div style="font-size:0.85rem;opacity:0.75;">{label}{SMALL_SAMPLE_TAG if small_sample else ""}</div>'
+        f'<div style="font-size:0.85rem;opacity:0.75;">{label}{help_icon}{SMALL_SAMPLE_TAG if small_sample else ""}</div>'
         f'<div style="font-size:2rem;font-weight:700;color:{color or "inherit"};">{value_text}{sample}</div>'
         f'<div style="font-size:0.75rem;opacity:0.7;">{pct}</div>'
         "</div>"
