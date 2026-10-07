@@ -39,6 +39,11 @@ SHOULDER_HEIGHT_FT = 5.0
 
 # Small samples (analysis/stabilization.py): below MIN_PITCHES_FOR_INCLUSION a pitcher is still shown,
 # but every metric is regressed toward the qualified league mean: (n * obs + k * mean) / (n + k)
-MIN_PITCHES_TO_DISPLAY = 50        # pitchers under this show "n/a"
+MIN_PITCHES_TO_DISPLAY = 100       # pitchers under this show "n/a" (= MIN_PITCHES_DASHBOARD, so nobody shown is all n/a)
+# Dashboard export only (analysis/export_report_data.py): pitchers with fewer total 2025 pitches
+# (all teams) aren't written to dashboard/data/ at all. Grading pool, league means and data/ are unchanged.
+MIN_PITCHES_DASHBOARD = 100        # ~6 innings
+DROP_ALL_NA_PITCHERS = True        # also check for pitchers at/above the minimum whose metrics are ALL blank:
+                                   # they're listed as an upstream problem and kept, never silently dropped
 MIN_PITCHES_PER_TYPE_TO_DISPLAY = 15   # per pitch type Stuff+/Location+ rows under this show "n/a"
 USE_REGRESSED = True               # downstream modules use the *_Reg columns (raw columns are always kept)

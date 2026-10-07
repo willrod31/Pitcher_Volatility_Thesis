@@ -34,12 +34,24 @@ pre-arb: league minimum, 1 year, FA); the dashboard tags it "est. contract".
 ContractValued = False for config.TWO_WAY_EXCLUDE_VALUE (no surplus values;
 ValueNote says so). team_paid_2025.csv: what each team paid a pitcher it
 shared (salaries.csv TeamPaid2025), one row per pitcher x team.
+
+Dashboard minimum (apply_dashboard_minimum, run last): pitchers with fewer
+than config.MIN_PITCHES_DASHBOARD total 2025 pitches (all teams, so a traded
+pitcher with 60 for one team and 300 for another stays on both) are removed
+from EVERY dashboard/data/ file, and from data/missing_contract_report.csv,
+so no file has orphan rows. Pitchers at or above it whose shown metrics are
+all blank are listed as an upstream problem and kept
+(config.DROP_ALL_NA_PITCHERS turns that check on). Pitch types within a shown
+pitcher keep config.MIN_PITCHES_PER_TYPE_TO_DISPLAY. The grading pool, league
+means, stabilization and everything in data/results/ are untouched.
 """
 import argparse
 from pathlib import Path
 
 import pandas as pd
 
+from config import DROP_ALL_NA_PITCHERS, MIN_PITCHES_DASHBOARD
+from analysis import location_plus_proxy, stuff_plus_proxy
 from analysis.contract_status import load_team_paid
 from analysis.data_acquisition import pitchers_only
 from analysis.injury_history import STINTS_PATH
@@ -50,6 +62,19 @@ OUT_PATH = DASHBOARD_DATA / "pitcher_report_data.csv"
 SURPLUS_OUT_PATH = DASHBOARD_DATA / "surplus_by_year.csv"
 STINTS_OUT_PATH = DASHBOARD_DATA / "injury_stints.csv"
 TEAM_PAID_OUT_PATH = DASHBOARD_DATA / "team_paid_2025.csv"
+MISSING_REPORT_PATH = Path(__file__).resolve().parent.parent / "data" / "missing_contract_report.csv"
+# every dashboard/data/ file keyed on PitcherId, filtered by apply_dashboard_minimum()
+DASHBOARD_FILES = [
+    stuff_plus_proxy.DASHBOARD_PATH, stuff_plus_proxy.DASHBOARD_PITCHES_PATH, stuff_plus_proxy.MOVEMENT_PITCHES_PATH,
+    stuff_plus_proxy.VELOCITY_PATH, location_plus_proxy.DASHBOARD_PATH, OUT_PATH, SURPLUS_OUT_PATH,
+    STINTS_OUT_PATH, TEAM_PAID_OUT_PATH,
+]
+# the metrics the dashboard shows per pitcher: (file, column)
+SHOWN_METRICS = [
+    (stuff_plus_proxy.DASHBOARD_PATH, "OverallStuffPlus_Scaled_Reg"),
+    (OUT_PATH, "LocationPlus_Reg"), (OUT_PATH, "AsymmetricUpsideIndex_Reg"),
+    (OUT_PATH, "VolatilityScore_Reg"), (OUT_PATH, "RiskAdjWAR"),
+]
 
 COLUMN_CONTRACT = [
     "PitcherId", "Pitcher", "Team", "StuffPlus", "StuffPlus_Scaled", "LocationPlus",
@@ -149,6 +174,72 @@ def run():
         stints = pitchers_only(pd.read_csv(STINTS_PATH), "PitcherId")
         stints.to_csv(STINTS_OUT_PATH, index=False)
         print(f"Saved {len(stints)} rows to {STINTS_OUT_PATH}")
+
+    apply_dashboard_minimum()
+
+
+def pitches_2025() -> pd.Series:
+    """Total cleaned 2025 pitches per PitcherId, all teams (the Stuff+ league table's PitchesThrown)."""
+    league = pd.read_parquet(stuff_plus_proxy.LEAGUE_PITCHER_PATH, columns=["PitcherId", "PitchesThrown"])
+    return league.drop_duplicates("PitcherId").set_index("PitcherId")["PitchesThrown"]
+
+
+def apply_dashboard_minimum() -> pd.DataFrame:
+    """Drop pitchers under MIN_PITCHES_DASHBOARD from every dashboard file; list 100+ pitchers whose metrics are all blank.
+
+    Returns one row per dropped pitcher x team.
+    """
+    thrown = pitches_2025()
+    roster = pd.read_csv(stuff_plus_proxy.DASHBOARD_PATH, usecols=["PitcherId", "Pitcher", "PitcherTeam"]) \
+        .drop_duplicates(["PitcherId", "PitcherTeam"]).rename(columns={"PitcherTeam": "Team"})
+    report = pd.read_csv(OUT_PATH)
+    ids = pd.Index(roster["PitcherId"].unique()).union(pd.Index(report["PitcherId"].unique()))
+    pitches = thrown.reindex(ids).fillna(0).astype(int)
+
+    shown = pd.DataFrame(index=ids)
+    for path, col in SHOWN_METRICS:
+        values = pd.read_csv(path, usecols=["PitcherId", col]).drop_duplicates("PitcherId").set_index("PitcherId")[col]
+        shown[col] = values.reindex(ids)
+    all_na = shown.isna().all(axis=1)
+    drop_ids = set(pitches.index[pitches < MIN_PITCHES_DASHBOARD])
+
+    by_team = roster.assign(Pitches2025=roster["PitcherId"].map(pitches), AllNA=roster["PitcherId"].map(all_na))
+    dropped = by_team[by_team["PitcherId"].isin(drop_ids)].sort_values(["Team", "Pitches2025"])
+    print(f"\n── Dashboard minimum: {MIN_PITCHES_DASHBOARD} pitches in 2025 (all teams) ──")
+    print(f"under {MIN_PITCHES_DASHBOARD} pitches: {dropped['PitcherId'].nunique()} pitcher(s) dropped "
+          f"({dropped.drop_duplicates('PitcherId')['AllNA'].sum()} of them also all n/a)")
+    if not dropped.empty:
+        print(dropped[["Team", "Pitcher", "PitcherId", "Pitches2025", "AllNA"]].to_string(index=False))
+
+    if DROP_ALL_NA_PITCHERS:
+        broken = by_team[~by_team["PitcherId"].isin(drop_ids) & by_team["AllNA"]]
+        print(f"\nall n/a with {MIN_PITCHES_DASHBOARD}+ pitches (upstream problem -- KEPT, not dropped): "
+              f"{broken['PitcherId'].nunique()}")
+        if not broken.empty:
+            print(broken[["Team", "Pitcher", "PitcherId", "Pitches2025"]].to_string(index=False))
+
+    # keep only pitchers shown on some team (catches ids no roster has, e.g. salaries.csv pitchers with no 2025 pitches)
+    shown_ids = set(roster["PitcherId"]) - drop_ids
+    for path in DASHBOARD_FILES + [MISSING_REPORT_PATH]:
+        if not path.exists():
+            continue
+        rows = pd.read_csv(path)
+        kept = rows[rows["PitcherId"].isin(shown_ids)]
+        if len(kept) < len(rows):
+            kept.to_csv(path, index=False)
+        print(f"  {path.name:<34} {len(rows) - len(kept):>7} row(s) removed, {len(kept):>7} kept")
+
+    teams = sorted(roster["Team"].unique())
+    summary = pd.DataFrame({
+        "dropped": dropped.groupby("Team").size().reindex(teams, fill_value=0),
+        "remaining": by_team[~by_team["PitcherId"].isin(drop_ids)].groupby("Team").size().reindex(teams, fill_value=0),
+    })
+    summary.loc["TOTAL"] = summary.sum()
+    print("\n── Pitchers per team (pitcher x team; a traded pitcher counts for each team) ──")
+    print(summary.to_string())
+    print(f"{len(drop_ids & set(ids))} unique pitcher(s) dropped, "
+          f"{len(set(roster['PitcherId']) - drop_ids)} unique pitcher(s) remain on the dashboard")
+    return dropped
 
 
 if __name__ == "__main__":

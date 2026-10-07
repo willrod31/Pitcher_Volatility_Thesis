@@ -177,8 +177,10 @@ def stat_html(label: str, value_text: str, color: str | None, percentile: float 
     )
 
 
-def legend_html() -> str:
-    """Gradient key: blue (worse) <- gray (league average) -> red (better)."""
+def legend_html(min_pitches: int | None = None) -> str:
+    """Gradient key: blue (worse) <- gray (league average) -> red (better), plus the dashboard's pitch minimum."""
+    minimum = (f'<div style="opacity:0.7;">Pitchers with fewer than {min_pitches} pitches in 2025 are not shown.</div>'
+               if min_pitches else "")
     return (
         '<div style="max-width:520px;margin:4px 0 12px 0;font-size:0.8rem;">'
         f'<div style="height:10px;border-radius:5px;background:linear-gradient(to right, '
@@ -188,7 +190,7 @@ def legend_html() -> str:
         "<span>Better than league average</span></div>"
         '<div style="opacity:0.7;">Compared to all qualified MLB pitchers.</div>'
         '<div style="opacity:0.7;">Small samples are pulled toward league average until they are reliable.</div>'
-        "</div>"
+        f"{minimum}</div>"
     )
 
 

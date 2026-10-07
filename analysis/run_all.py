@@ -46,7 +46,7 @@ from analysis import (
 from analysis.data_acquisition import (
     PITCHER_POSITION_CODES, fetch_positions, load_season_monthly, seed_team_caches_from_league, team_roster_ids,
 )
-from analysis.utils import CACHE_DIR, STATCAST_TEAM_DIR
+from analysis.utils import STATCAST_TEAM_DIR
 
 # Statcast team codes (AZ, not ARI), same list as dashboard/app.py
 TEAMS = [
@@ -55,7 +55,7 @@ TEAMS = [
 ]
 TEAM_ALIASES = {"ARI": "AZ"}   # FanGraphs / salaries.csv code -> Statcast
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
-REPORT_PATH = CACHE_DIR / "missing_contract_report.csv"
+REPORT_PATH = export_report_data.MISSING_REPORT_PATH
 REPORT_COLUMNS = ["PitcherId", "Pitcher", "Team", "Problem", "Fix", "ContractStatus_est", "EstYearsControl", "Pitches2025"]
 PROBLEM_DEFAULT = "not in salaries.csv"
 PROBLEM_MISMATCH = "status mismatch (estimate says arb, defaulted to FA)"

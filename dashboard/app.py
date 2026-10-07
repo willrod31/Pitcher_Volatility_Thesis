@@ -13,7 +13,7 @@ from colors import (  # noqa: E402  (dashboard-local helper module)
     BAD_COLOR, GOOD_COLOR, NEUTRAL_COLOR, NEUTRAL_TEXT_LIGHT, LeaguePools, colored_numbers, is_small_sample, legend_html, rgba,
     stat_color, stat_html,
 )
-from config import END_DATE, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, START_DATE  # noqa: E402
+from config import END_DATE, MIN_PITCHES_DASHBOARD, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, START_DATE  # noqa: E402
 
 st.set_page_config(
     page_title="Pitcher Valuation Dashboard",
@@ -570,7 +570,7 @@ with tab_report:
             if report_data is not None and (report_data["PitcherId"] == pitcher_id).any() else None
         )
 
-        st.markdown(legend_html(), unsafe_allow_html=True)
+        st.markdown(legend_html(MIN_PITCHES_DASHBOARD), unsafe_allow_html=True)
 
         def value_of(row, col):
             return None if row is None or col not in row or pd.isna(row[col]) else row[col]
@@ -746,7 +746,7 @@ with tab_board:
         "Graded against the whole league, not just this staff."
     )
 
-    st.markdown(legend_html(), unsafe_allow_html=True)
+    st.markdown(legend_html(MIN_PITCHES_DASHBOARD), unsafe_allow_html=True)
 
     if not team_pitchers:
         st.info("No data loaded for this team yet.")
