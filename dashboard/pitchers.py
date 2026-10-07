@@ -1,4 +1,4 @@
-# Pitcher Valuation Dashboard
+# Pitcher Valuation Dashboard: team + pitcher pages (routed from app.py)
 import sys
 from pathlib import Path
 
@@ -14,11 +14,6 @@ from colors import (  # noqa: E402  (dashboard-local helper module)
     stat_color, stat_html,
 )
 from config import END_DATE, MIN_PITCHES_DASHBOARD, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, START_DATE  # noqa: E402
-
-st.set_page_config(
-    page_title="Pitcher Valuation Dashboard",
-    layout="wide",
-)
 
 DATA_DIR = Path(__file__).parent / "data"
 STUFF_PLUS_SUMMARY_PATH = DATA_DIR / "stuff_plus_pitch_types.csv"
