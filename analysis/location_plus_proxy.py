@@ -52,7 +52,7 @@ from config import (
 )
 from analysis.data_acquisition import filter_to_team, load_season_monthly, lookup_mlbam_id, pitchers_only, primary_team
 from analysis.stabilization import load_k, regress, reliability
-from analysis.utils import LOCATION_PLUS_DIR, scale_100
+from analysis.utils import LOCATION_PLUS_DIR, WRITES_DASHBOARD, scale_100
 
 PITCHES_PATH = LOCATION_PLUS_DIR / "location_plus_pitches.parquet"
 SUMMARY_PATH = LOCATION_PLUS_DIR / "location_plus_summary.parquet"
@@ -338,7 +338,8 @@ def grade_league(force_refresh: bool = False) -> pd.DataFrame:
     pitcher_level.to_parquet(PITCHER_PATH, index=False)
     print(f"Saved {len(by_type)} pitcher x pitch type rows to {SUMMARY_PATH}")
     print(f"Saved {len(pitcher_level)} pitcher rows ({pitcher_level['Qualified'].sum()} qualified) to {PITCHER_PATH}")
-    save_for_dashboard(by_type, pitcher_level)
+    if WRITES_DASHBOARD:
+        save_for_dashboard(by_type, pitcher_level)
 
     print("\n── Command reliability (odd/even split halves, qualified pitchers) ──")
     print(reliability_test(scored).round(3).to_string(index=False))

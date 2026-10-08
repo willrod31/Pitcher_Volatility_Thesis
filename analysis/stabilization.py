@@ -41,10 +41,11 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize_scalar
 
-from analysis.utils import RESULTS_DIR
-from config import MIN_PITCHES_FOR_INCLUSION
+from analysis.utils import BASE_RESULTS_DIR
+from config import DEFAULT_SEASON, MIN_PITCHES_FOR_INCLUSION, SEASON
 
-STABILIZATION_PATH = RESULTS_DIR / "stabilization.csv"
+# Always the DEFAULT_SEASON (2025) fit: other seasons reuse these k values, they don't refit them.
+STABILIZATION_PATH = BASE_RESULTS_DIR / "stabilization.csv"
 
 PITCH_GRID = [25, 50, 100, 200, 400]
 PA_GRID = [25, 50, 100, 200]
@@ -228,6 +229,9 @@ def print_table(table: pd.DataFrame):
 
 
 def run():
+    if SEASON != DEFAULT_SEASON:
+        raise SystemExit(f"Stabilization k values are fit on {DEFAULT_SEASON} only and reused for other seasons "
+                         f"(THESIS_SEASON={SEASON}); unset THESIS_SEASON to refit.")
     table = build_table()
     table.to_csv(STABILIZATION_PATH, index=False)
     print("\n── Stabilization points ──")

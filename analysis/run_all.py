@@ -4,6 +4,14 @@ the dashboard data and the missing-contract report.
 
     python -m analysis.run_all
     python -m analysis.run_all --teams PIT,LAD
+    python -m analysis.run_all --season 2023     (same as THESIS_SEASON=2023)
+
+--season (any season but config.DEFAULT_SEASON) runs the league-wide metrics
+only -- Location+, volatility, injury history (config.INJURY_LOOKBACK_SEASONS
+ending that season), Stuff+ and asymmetric upside, each season training its
+own out-of-fold Stuff+ / Location+ models and reusing the default season's
+stabilization k values. Output goes to data/results/season_<YYYY>/; no
+contracts, no surplus, and nothing is written to dashboard/data/.
 
 Per team, the modules run in the usual order: injury_history,
 contract_status, stuff_plus_proxy, location_plus_proxy, asymmetric_upside,
@@ -18,8 +26,10 @@ the end. League-wide training and grading happens ONCE, not per team:
    risk_adjusted_value grade the league using every team's IL history.
 3. League, once: the league-wide Statcast season is loaded month by month
    (load_season_monthly, fits in 8GB) and shared; Stuff+ and Location+ reuse
-   their cached out-of-fold scores; then upside, volatility and
-   risk-adjusted value are graded league-wide.
+   their cached out-of-fold scores; then upside and volatility are graded
+   league-wide, FIP-WAR and the WAR calibration run (config.WAR_MODEL =
+   "calibrated"; they need the --season runs for the earlier
+   config.CALIBRATION_SEASONS first), then risk-adjusted value.
 4. Per team: each module's team view (graded vs. the league) and the
    Stuff+ dashboard exports, sliced from the shared league frame by PitcherId
    (every pitch the pitcher threw all season, any team).
@@ -31,22 +41,31 @@ continues, and every failure is listed at the end.
 """
 import argparse
 import contextlib
+import os
+import sys
 import time
 import traceback
 from pathlib import Path
 
+# --season has to be set before config is imported: every module reads config.SEASON at import time
+for _n, _arg in enumerate(sys.argv):
+    if _arg == "--season" and _n + 1 < len(sys.argv):
+        os.environ["THESIS_SEASON"] = sys.argv[_n + 1]
+    elif _arg.startswith("--season="):
+        os.environ["THESIS_SEASON"] = _arg.split("=", 1)[1]
+
 import numpy as np
 import pandas as pd
 
-from config import END_DATE, START_DATE
+from config import DEFAULT_SEASON, END_DATE, MIN_PITCHES_TO_DISPLAY, SEASON, START_DATE, WAR_MODEL
 from analysis import (
-    asymmetric_upside, contract_status, export_report_data, injury_history, location_plus_proxy,
-    risk_adjusted_value, stuff_plus_proxy, volatility_discount,
+    asymmetric_upside, contract_status, export_report_data, fip_war, injury_history, location_plus_proxy,
+    risk_adjusted_value, stuff_plus_proxy, volatility_discount, war_calibration,
 )
 from analysis.data_acquisition import (
     PITCHER_POSITION_CODES, fetch_positions, load_season_monthly, seed_team_caches_from_league, team_roster_ids,
 )
-from analysis.utils import STATCAST_TEAM_DIR
+from analysis.utils import RESULTS_DIR, STATCAST_TEAM_DIR
 
 # Statcast team codes (AZ, not ARI), same list as dashboard/app.py
 TEAMS = [
@@ -214,6 +233,10 @@ def run(teams: list[str]):
     volatility = runner.step("league", "volatility_discount", volatility_discount.grade_league)
     if volatility is not None:
         runner.step("league", "volatility regressions", volatility_discount.run_regressions, volatility[1])
+    if WAR_MODEL == "calibrated":
+        # needs data/results/season_<YYYY>/ for the earlier calibration seasons (run_all --season <YYYY>)
+        runner.step("league", "fip_war", fip_war.run)
+        runner.step("league", "war_calibration", war_calibration.run)
     value = runner.step("league", "risk_adjusted_value", risk_adjusted_value.grade_league)
 
     print("\n── 4. Team views + dashboard exports, per team ──")
@@ -262,10 +285,55 @@ def run(teams: list[str]):
     return runner.failures
 
 
+def run_season():
+    """League-wide metrics for a non-default season (config.SEASON != DEFAULT_SEASON), no contracts or dashboard.
+
+    Order keeps one league-wide frame in memory at a time (8GB box): Location+
+    and the volatility appearance table each load and free their own monthly
+    frame; then the Stuff+/upside frame is loaded once and shared.
+    """
+    LOG_DIR.mkdir(exist_ok=True)
+    scope = f"league_{SEASON}"
+    (LOG_DIR / f"run_{scope}.txt").write_text(f"python -m analysis.run_all --season {SEASON}, {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    runner = Runner()
+    print(f"── {SEASON}: league-wide metrics only ({START_DATE} to {END_DATE}) -> {RESULTS_DIR} ──")
+
+    location = runner.step(scope, "location_plus_proxy", location_plus_proxy.grade_league)
+    apps = runner.step(scope, "volatility appearances", volatility_discount.build_appearances)
+    if apps is not None:
+        totals = apps.groupby(["PitcherId", "Pitcher"], dropna=False)["Pitches"].sum().reset_index()
+        pitchers = totals[totals["Pitches"] >= MIN_PITCHES_TO_DISPLAY][["PitcherId", "Pitcher"]]
+        print(f"  pulling IL history for {len(pitchers)} pitchers with {MIN_PITCHES_TO_DISPLAY}+ pitches")
+        result = runner.step(scope, "injury_history", injury_history.build_injury_history, pitchers)
+        if result is not None:
+            runner.step(scope, "save injury_history", injury_history.save_injury_history, *result)
+    apps = None
+    volatility = runner.step(scope, "volatility_discount", volatility_discount.grade_league)
+    if volatility is not None:
+        runner.step(scope, "volatility regressions", volatility_discount.run_regressions, volatility[1])
+    volatility = None
+
+    league = runner.step(scope, "load league season", load_season_monthly, START_DATE, END_DATE, columns=LEAGUE_COLUMNS)
+    if league is not None:
+        stuff = runner.step(scope, "stuff_plus_proxy", stuff_plus_proxy.grade_league, train_df=league)
+        if stuff is not None and location is not None:
+            runner.step(scope, "asymmetric_upside", asymmetric_upside.grade_league, df=league)
+
+    print(f"\nLog: {LOG_DIR}/run_{scope}.txt")
+    for scope_name, name, err in runner.failures:
+        print(f"  FAILED {scope_name:<12} {name:<22} {err}")
+    print("No failures." if not runner.failures else f"{len(runner.failures)} FAILED step(s)")
+    return runner.failures
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the full pipeline for every MLB team, then export the dashboard data.")
     parser.add_argument("--teams", default=None, help="Comma-separated Statcast team codes, e.g. --teams PIT,LAD (default: all 30)")
+    parser.add_argument("--season", type=int, default=None,
+                        help=f"Grade another season league-wide (default {DEFAULT_SEASON}); same as THESIS_SEASON=<YYYY>")
     args = parser.parse_args()
+    if SEASON != DEFAULT_SEASON:
+        sys.exit(1 if run_season() else 0)
     selected = [t.strip().upper() for t in args.teams.split(",")] if args.teams else TEAMS
     selected = [TEAM_ALIASES.get(t, t) for t in selected]
     unknown = sorted(set(selected) - set(TEAMS))

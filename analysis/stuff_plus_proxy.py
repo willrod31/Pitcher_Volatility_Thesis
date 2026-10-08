@@ -39,7 +39,7 @@ from sklearn.preprocessing import StandardScaler
 
 from analysis.data_acquisition import END_DATE, START_DATE, pitchers_only, load_pitcher_season, load_season_monthly, load_team_roster_full_seasons, primary_team
 from analysis.stabilization import load_k, regress, reliability
-from analysis.utils import STUFF_PLUS_DIR, scale_100
+from analysis.utils import STUFF_PLUS_DIR, WRITES_DASHBOARD, scale_100
 from config import (
     MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_FOR_SCALE, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, SHOULDER_HEIGHT_FT,
 )
@@ -396,9 +396,14 @@ def grade_league(force_refresh: bool = False, train_df: pd.DataFrame | None = No
     thrown = train_df.groupby("pitcher").size()
     summary, pitcher = add_regressed(summary, pitcher, thrown)
 
-    v1_type, v1_pitcher = v1_tables(train_df, force_refresh)
-    summary = summary.merge(v1_type, on=["PitcherId", "PitchType"], how="left")
-    pitcher = pitcher.merge(v1_pitcher, on="PitcherId", how="left")
+    if WRITES_DASHBOARD:
+        v1_type, v1_pitcher = v1_tables(train_df, force_refresh)
+        summary = summary.merge(v1_type, on=["PitcherId", "PitchType"], how="left")
+        pitcher = pitcher.merge(v1_pitcher, on="PitcherId", how="left")
+    else:
+        # v1 is a 2025 comparison only; other seasons skip the extra fit
+        summary[["StuffPlus_v1", "StuffPlus_Scaled_v1"]] = np.nan
+        pitcher[["StuffPlus_v1", "StuffPlus_Scaled_v1"]] = np.nan
     pitcher["p_throws"] = pitcher["PitcherId"].map(train_df.drop_duplicates("pitcher").set_index("pitcher")["p_throws"])
 
     summary.to_parquet(LEAGUE_SUMMARY_PATH, index=False)
@@ -411,6 +416,9 @@ def grade_league(force_refresh: bool = False, train_df: pd.DataFrame | None = No
 def compare_to_v1(pitcher: pd.DataFrame) -> pd.DataFrame:
     """Correlation of v1 vs. new Stuff+ (qualified pitchers), overall / RHP / LHP, and the 10 biggest movers."""
     q = pitcher[pitcher["Qualified"]].dropna(subset=["StuffPlus", "StuffPlus_v1"]).copy()
+    if q.empty:
+        print("No StuffPlus_v1 values (v1 is fit for the default season only) -- skipping the v1 comparison")
+        return q
     q["ScaledChange"] = q["StuffPlus_Scaled"] - q["StuffPlus_Scaled_v1"]
     print("\n── Stuff+ v1 vs. new (qualified pitchers) ──")
     for label, rows in [("All", q), ("RHP", q[q["p_throws"] == "R"]), ("LHP", q[q["p_throws"] == "L"])]:
@@ -452,6 +460,9 @@ def save_for_dashboard(summary: pd.DataFrame, pitcher_level: pd.DataFrame):
 def upsert_csv(rows: pd.DataFrame, path: Path, keys: list[str] | None = None):
     """Replace this run's `keys` (default PitcherId) in `path`, keep everyone else."""
     keys = keys or ["PitcherId"]
+    if not WRITES_DASHBOARD and DASHBOARD_DATA in path.parents:
+        print(f"Not writing {path.name}: dashboard/data/ holds the default season only")
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         existing = pd.read_csv(path)

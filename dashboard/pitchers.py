@@ -14,7 +14,7 @@ from colors import (  # noqa: E402  (dashboard-local helper module)
     stat_color, stat_html,
 )
 from pitch_types import PITCH_TYPE_COLORS, PITCH_TYPE_ORDER, pitch_abbr, pitch_label, pitch_name  # noqa: E402
-from config import END_DATE, MIN_PITCHES_DASHBOARD, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, START_DATE  # noqa: E402
+from config import END_DATE, MIN_PITCHES_DASHBOARD, MIN_PITCHES_FOR_INCLUSION, MIN_PITCHES_PER_TYPE_TO_DISPLAY, MIN_PITCHES_TO_DISPLAY, SEASON, START_DATE  # noqa: E402
 
 DATA_DIR = Path(__file__).parent / "data"
 STUFF_PLUS_SUMMARY_PATH = DATA_DIR / "stuff_plus_pitch_types.csv"
@@ -27,6 +27,11 @@ VELOCITY_PATH = DATA_DIR / "velocity_by_game.csv"           # from analysis/stuf
 INJURY_STINTS_PATH = DATA_DIR / "injury_stints.csv"         # from analysis/export_report_data.py
 TEAM_PAID_PATH = DATA_DIR / "team_paid_2025.csv"           # from analysis/export_report_data.py
 EST_CONTRACT_TAG = "est. contract"   # default contract: not in salaries.csv, league minimum, 1 yr
+NEXT_SEASON = SEASON + 1             # projected WAR and surplus start here
+# Value labels (cards, board columns and their hover help share these)
+PROJ_WAR_LABEL = f"Projected {NEXT_SEASON} WAR"
+ACTUAL_WAR_LABEL = f"{SEASON} FIP-WAR (actual)"
+SURPLUS_LABEL = f"Multi-yr surplus from {NEXT_SEASON}"
 
 # Every MLB team, by league -- (Statcast team code, full name). Lets the
 # sidebar navigate the whole league even though only a handful of pitchers
@@ -147,7 +152,7 @@ SURPLUS_COLORSCALE = [[0.0, BAD_COLOR], [0.5, NEUTRAL_COLOR], [1.0, GOOD_COLOR]]
 
 
 def value_scatter(team_table: pd.DataFrame) -> go.Figure:
-    """x = risk-adjusted WAR, y = salary, size = years of control, color = multi-year surplus.
+    """x = projected next-season WAR, y = salary, size = years of control, color = multi-year surplus.
 
     Undervalued pitchers with long control land bottom-right as large blue points.
     """
@@ -168,13 +173,13 @@ def value_scatter(team_table: pd.DataFrame) -> go.Figure:
         ),
         customdata=data[["Pitcher", "ControlYearsUsed", "MultiYearSurplus_M"]].values,
         hovertemplate=(
-            "%{customdata[0]}<br>Risk-adj. WAR: %{x:.2f}<br>Salary: $%{y:.2f}M"
+            "%{customdata[0]}<br>" + PROJ_WAR_LABEL + ": %{x:.2f}<br>Salary: $%{y:.2f}M"
             "<br>Control years: %{customdata[1]:.0f}<br>Multi-yr surplus: $%{customdata[2]:.1f}M<extra></extra>"
         ),
     ))
     fig.update_layout(
-        xaxis_title="Risk-adjusted WAR (proxy)",
-        yaxis_title="2025 salary ($M)",
+        xaxis_title=PROJ_WAR_LABEL,
+        yaxis_title=f"{SEASON} salary ($M)",
         margin=dict(t=10, l=10, r=10, b=10),
         height=440,
     )
@@ -184,7 +189,7 @@ def value_scatter(team_table: pd.DataFrame) -> go.Figure:
 def surplus_by_year_chart(pitcher_years: pd.DataFrame, pools: LeaguePools) -> go.Figure:
     """Each year's discounted surplus, colored vs. the league's single-season surplus pool."""
     values = pitcher_years["DiscountedSurplus"] / 1_000_000
-    colors = [pools.color("SurplusCurrentSeason_M", v) or NEUTRAL_COLOR for v in values]
+    colors = [pools.color("SurplusActual_M", v) or NEUTRAL_COLOR for v in values]
     fig = go.Figure(go.Bar(
         x=pitcher_years["Season"].astype(str), y=values,
         marker=dict(color=colors),
@@ -389,11 +394,22 @@ STAT_HELP = {
     "Stuff+": "Pitch shape quality, where 100 is league average, 10 points is 1 standard deviation and 110 or more is very good.",
     "Location+": "Command (where pitches cross the plate for the count), where 100 is league average and higher is better.",
     "Volatility percentile": "How much velocity and release point change from outing to outing compared to the league, where lower is better and 50 is average.",
-    "Risk-adj. WAR": "Projected wins above replacement after a discount for volatility and injury history, where higher is better (an uncalibrated proxy).",
-    "Multi-yr surplus": "Value produced minus salary over every remaining year of team control in today's dollars, where positive means underpaid.",
-    "2025 surplus": "Value produced minus salary for 2025 only, where positive means underpaid.",
-    "2025 salary": "What the pitcher is paid in 2025 in millions, where lower is better for the same production.",
-    "Years of control": "Seasons the team controls the pitcher before free agency, where more years of a good pitcher is better.",
+    PROJ_WAR_LABEL: (f"How many wins above a replacement-level pitcher he is expected to add in {NEXT_SEASON}: "
+                     "expected runs allowed per 9 innings (from his Stuff+, Location+ and this year's results) times "
+                     "expected innings (from his innings, age, injury history and volatility). Fitted on real "
+                     "2023-2025 results; higher is better."),
+    ACTUAL_WAR_LABEL: (f"Wins above replacement he actually produced in {SEASON}, from his strikeouts, walks, hit "
+                       "batters, home runs and innings (FanGraphs' FIP-WAR method, without park or bullpen-leverage "
+                       "adjustments). Higher is better."),
+    SURPLUS_LABEL: (f"Projected value minus salary over every year of team control he has left, starting in "
+                    f"{NEXT_SEASON} (the first season a team trading for him now would get), in today's dollars. "
+                    "Positive means underpaid. Blank for a pitcher who becomes a free agent after "
+                    f"{SEASON}: there are no team-controlled years left to value."),
+    f"{SEASON} surplus": (f"Looking back: what his actual {SEASON} FIP-WAR was worth minus his {SEASON} salary. "
+                          "Positive means he was underpaid."),
+    f"{SEASON} salary": f"What the pitcher is paid in {SEASON} in millions, where lower is better for the same production.",
+    "Control left": (f"Seasons from {NEXT_SEASON} on that the team controls the pitcher before free agency (0 = free agent "
+                     f"after {SEASON}), where more years of a good pitcher is better."),
     "Pitches": "Pitches thrown in 2025, where more pitches means more reliable grades.",
     "Sample": "\"small\" means the sample is too small for the grade to be reliable yet (reliability under 0.5).",
     "Contract": "Notes on the contract, such as an estimated contract or a two-way player whose salary is not valued.",
@@ -423,11 +439,14 @@ BOARD_HELP = {
     "Stuff+": STAT_HELP["Stuff+"],
     "Location+": STAT_HELP["Location+"],
     "Sample": STAT_HELP["Sample"],
-    "Risk-adj. WAR": STAT_HELP["Risk-adj. WAR"],
-    "2025 salary ($M)": STAT_HELP["2025 salary"],
-    "Years of control": STAT_HELP["Years of control"],
-    "Multi-yr surplus ($M)": STAT_HELP["Multi-yr surplus"],
-    "2025 surplus ($M)": STAT_HELP["2025 surplus"],
+    "Role": f"Starter or reliever, from his {SEASON} games started (starter = started half his games or more).",
+    f"Proj. {NEXT_SEASON} WAR": STAT_HELP[PROJ_WAR_LABEL],
+    f"Proj. {NEXT_SEASON} IP": f"Innings he is expected to pitch in {NEXT_SEASON} (0 if the model expects him to miss the year).",
+    f"{SEASON} FIP-WAR": STAT_HELP[ACTUAL_WAR_LABEL],
+    f"{SEASON} salary ($M)": STAT_HELP[f"{SEASON} salary"],
+    "Control left": STAT_HELP["Control left"],
+    f"Surplus from {NEXT_SEASON} ($M)": STAT_HELP[SURPLUS_LABEL],
+    f"{SEASON} surplus, actual ($M)": STAT_HELP[f"{SEASON} surplus"],
     "Pitch mix": STAT_HELP["Pitch mix"],
     "Contract": STAT_HELP["Contract"],
 }
@@ -618,7 +637,7 @@ with tab_report:
             return f"{'-' if v < 0 else ''}${abs(v):.1f}M"
 
         # (label, metric key in colors.METRIC_DIRECTION, regressed value, raw value, n, unit, reliability, formatter)
-        cards = [
+        grade_cards = [
             ("Stuff+", "StuffPlus_Scaled_Reg", value_of(stuff_overall, "OverallStuffPlus_Scaled_Reg"),
              value_of(stuff_overall, "OverallStuffPlus_Scaled"), value_of(stuff_overall, "OverallPitches"), "pitches",
              value_of(stuff_overall, "OverallStuffPlus_Reliability"), "{:.0f}"),
@@ -628,32 +647,37 @@ with tab_report:
             ("Volatility percentile", "VolatilityPercentile", report_value("VolatilityPercentile_Reg"),
              report_value("VolatilityPercentile"), report_value("Appearances"), "apps",
              report_value("VolatilityReliability"), "{:.0f}"),
-            ("Risk-adj. WAR proxy", "RiskAdjWAR", report_value("RiskAdjWAR"), None, None, None, None, "{:.2f}"),
-            ("Multi-yr surplus", "MultiYearSurplus_M", report_value("MultiYearSurplus_M"), None, None, None, None, None),
         ]
-        for col, (label, metric, value, raw, n, unit, rel, fmt) in zip(st.columns(5), cards):
-            if value is None:
-                text, sample = "n/a", None
-            else:
-                text = money(value) if fmt is None else fmt.format(value)
-                sample = f"{n:,.0f} {unit}" if n is not None else None
-            if metric == "MultiYearSurplus_M":
-                if not contract_valued(report_row):
-                    # a two-way player's salary pays for hitting too: no pitcher-only value
-                    text, value = f'<span style="font-size:1rem;">{report_row["ValueNote"]}</span>', None
-                elif contract_estimated(report_row) and value is not None:
-                    sample = EST_CONTRACT_TAG
-            hover = None
-            if raw is not None:
-                hover = f"Raw (unregressed): {fmt.format(raw)}" + (f" · Reliability {rel:.2f}" if rel is not None else "")
-            elif unit is None and value is not None:
-                hover = "Built from the regressed Stuff+, Location+ and volatility values"
-            col.markdown(
-                stat_html(label, text, pools.color(metric, value, 1.0 if rel is None else rel), pools.percentile(metric, value),
-                          sample_text=sample, hover=hover, small_sample=value is not None and is_small_sample(rel),
-                          help=STAT_HELP[label.removesuffix(" proxy")]),
-                unsafe_allow_html=True,
-            )
+        projected_ip, role = report_value("ProjectedIP"), report_value("ProjectedRole")
+        value_cards = [
+            (PROJ_WAR_LABEL, "RiskAdjWAR", report_value("RiskAdjWAR"), None,
+             None if projected_ip is None else f"{projected_ip:.0f} IP, {role or 'role n/a'}", None, None, "{:.1f}"),
+            (ACTUAL_WAR_LABEL, "ActualWAR", report_value("ActualWAR"), None,
+             None if report_value("ActualIP") is None else f"{report_value('ActualIP'):.0f} IP", None, None, "{:.1f}"),
+            (SURPLUS_LABEL, "MultiYearSurplus_M", report_value("MultiYearSurplus_M"), None, None, None, None, None),
+        ]
+        for cards in (grade_cards, value_cards):
+            for col, (label, metric, value, raw, n, unit, rel, fmt) in zip(st.columns(3), cards):
+                if value is None:
+                    text, sample = "n/a", None
+                else:
+                    text = money(value) if fmt is None else fmt.format(value)
+                    sample = n if isinstance(n, str) else (f"{n:,.0f} {unit}" if n is not None else None)
+                if metric == "MultiYearSurplus_M" and report_row is not None:
+                    if not contract_valued(report_row) or bool(report_row.get("FreeAgentAfterSeason", False)):
+                        # two-way player (salary pays for hitting too) or no control left: no surplus to show
+                        text, value = f'<span style="font-size:1rem;">{report_row["ValueNote"]}</span>', None
+                    elif contract_estimated(report_row) and value is not None:
+                        sample = EST_CONTRACT_TAG
+                hover = None
+                if raw is not None:
+                    hover = f"Raw (unregressed): {fmt.format(raw)}" + (f" · Reliability {rel:.2f}" if rel is not None else "")
+                col.markdown(
+                    stat_html(label, text, pools.color(metric, value, 1.0 if rel is None else rel), pools.percentile(metric, value),
+                              sample_text=sample, hover=hover, small_sample=value is not None and is_small_sample(rel),
+                              help=STAT_HELP[label]),
+                    unsafe_allow_html=True,
+                )
 
         st.caption(SCALE_CAPTION + " Percentile = share of the qualified league pool this pitcher is better than. "
                    "Hover a number for its raw (unregressed) value.")
@@ -669,10 +693,10 @@ with tab_report:
                  f"Under {MIN_PITCHES_FOR_INCLUSION} pitches: shown with regressed values, not in the league grading pool. ")
                 + f"Graded against every qualified MLB pitcher. Volatility path: {report_row['VolatilityPath']}. "
                 + (f"Contract: {report_row['ValueNote']}. " if not contract_valued(report_row) else
-                   f"Contract: {report_row['ContractStatus']}, {report_row['YearsControl']:.0f} year(s) of control "
-                   f"({report_row['ControlSource']})"
+                   f"Contract: {report_row['ContractStatus']}, {report_row['RemainingControl']:.0f} year(s) of control left "
+                   f"from {NEXT_SEASON} ({report_row['ControlSource']})"
                    + (f", {EST_CONTRACT_TAG}: not in salaries.csv, valued at the league minimum. " if contract_estimated(report_row) else ". "))
-                + "WAR is an uncalibrated proxy (see README)."
+                + f"Projected WAR is fitted on real 2023-2025 FIP-WAR and held flat across the control years (see README)."
             )
             if pd.notna(report_row.get("MostUsedPitch")) and pd.notna(report_row.get("BestPitch")):
                 st.caption(pitch_mix_text(report_row["MostUsedPitch"], report_row["BestPitch"])
@@ -782,8 +806,9 @@ with tab_report:
 # Tab 2: team view, ranked by multi-year surplus
 with tab_board:
     st.markdown(
-        f"**{team_name_choice}** ranked by multi-year surplus: risk-adjusted production over "
-        "every remaining year of team control, minus what they're paid, discounted to today. "
+        f"**{team_name_choice}** ranked by multi-year surplus: projected production over "
+        f"every year of team control left from {NEXT_SEASON} on, minus what they're paid, discounted to today. "
+        f"Pitchers who become free agents after {SEASON} have no control years to value and are listed last. "
         "Graded against the whole league, not just this staff."
     )
 
@@ -824,14 +849,19 @@ with tab_board:
             "small" if is_small_sample(a) or is_small_sample(b) else ""
             for a, b in zip(team_table["StuffReliability"], team_table["LocationReliability"])
         ]
-        team_table = team_table.sort_values("MultiYearSurplus_M", ascending=False, na_position="last")
+        # surplus high to low, then pitchers with no surplus, then free agents after SEASON (no control to value)
+        team_table["_free_agent"] = team_table["FreeAgentAfterSeason"].fillna(False).astype(bool)
+        team_table = team_table.sort_values(["_free_agent", "MultiYearSurplus_M"], ascending=[True, False], na_position="last")
 
         shown = team_table.rename(columns={
-            "StuffScaled": "Stuff+", "OverallLocationPlus": "Location+", "RiskAdjWAR": "Risk-adj. WAR", "Salary_M": "2025 salary ($M)",
-            "YearsControl": "Years of control", "MultiYearSurplus_M": "Multi-yr surplus ($M)",
-            "SurplusCurrentSeason_M": "2025 surplus ($M)", "PitchesThrown": "Pitches",
-        })[["Pitcher", "Pitches", "Stuff+", "Location+", "Sample", "Risk-adj. WAR", "2025 salary ($M)", "Years of control",
-            "Multi-yr surplus ($M)", "2025 surplus ($M)", "Pitch mix", "Contract"]].reset_index(drop=True)
+            "StuffScaled": "Stuff+", "OverallLocationPlus": "Location+", "ProjectedRole": "Role",
+            "RiskAdjWAR": f"Proj. {NEXT_SEASON} WAR", "ProjectedIP": f"Proj. {NEXT_SEASON} IP", "ActualWAR": f"{SEASON} FIP-WAR",
+            "Salary_M": f"{SEASON} salary ($M)", "RemainingControl": "Control left",
+            "MultiYearSurplus_M": f"Surplus from {NEXT_SEASON} ($M)", "SurplusActual_M": f"{SEASON} surplus, actual ($M)",
+            "PitchesThrown": "Pitches",
+        })[["Pitcher", "Pitches", "Stuff+", "Location+", "Sample", "Role", f"Proj. {NEXT_SEASON} WAR", f"Proj. {NEXT_SEASON} IP",
+            f"{SEASON} FIP-WAR", f"{SEASON} salary ($M)", "Control left", f"Surplus from {NEXT_SEASON} ($M)",
+            f"{SEASON} surplus, actual ($M)", "Pitch mix", "Contract"]].reset_index(drop=True)
         reliability_for_column = {
             "Stuff+": team_table["StuffReliability"].reset_index(drop=True),
             "Location+": team_table["LocationReliability"].reset_index(drop=True),
@@ -839,8 +869,8 @@ with tab_board:
 
         metric_for_column = {
             "Stuff+": "StuffPlus_Scaled", "Location+": "LocationPlus",
-            "Risk-adj. WAR": "RiskAdjWAR", "2025 salary ($M)": "Salary_M",
-            "Multi-yr surplus ($M)": "MultiYearSurplus_M", "2025 surplus ($M)": "SurplusCurrentSeason_M",
+            f"Proj. {NEXT_SEASON} WAR": "RiskAdjWAR", f"{SEASON} FIP-WAR": "ActualWAR", f"{SEASON} salary ($M)": "Salary_M",
+            f"Surplus from {NEXT_SEASON} ($M)": "MultiYearSurplus_M", f"{SEASON} surplus, actual ($M)": "SurplusActual_M",
         }
         cell_colors = pd.DataFrame(None, index=shown.index, columns=shown.columns, dtype=object)
         for col, metric in metric_for_column.items():
@@ -848,16 +878,18 @@ with tab_board:
             cell_colors[col] = [pools.color(metric, v, r) for v, r in zip(shown[col], rel)]
         st.dataframe(
             colored_numbers(shown, cell_colors, {
-                "Pitches": "{:,.0f}", "Stuff+": "{:.0f}", "Location+": "{:.0f}", "Risk-adj. WAR": "{:.2f}",
-                "2025 salary ($M)": "{:.2f}", "Years of control": "{:.0f}",
-                "Multi-yr surplus ($M)": "{:.1f}", "2025 surplus ($M)": "{:.1f}",
+                "Pitches": "{:,.0f}", "Stuff+": "{:.0f}", "Location+": "{:.0f}", f"Proj. {NEXT_SEASON} WAR": "{:.1f}",
+                f"Proj. {NEXT_SEASON} IP": "{:.0f}", f"{SEASON} FIP-WAR": "{:.1f}",
+                f"{SEASON} salary ($M)": "{:.2f}", "Control left": "{:.0f}",
+                f"Surplus from {NEXT_SEASON} ($M)": "{:.1f}", f"{SEASON} surplus, actual ($M)": "{:.1f}",
             }),
             width='stretch', hide_index=True,
             column_config={col: st.column_config.Column(help=text) for col, text in BOARD_HELP.items()},
         )
         st.caption("Stuff+ / Location+ are regressed toward 100 by sample size; faded color = less reliable. "
                    f"Contract: \"{EST_CONTRACT_TAG}\" = not in salaries.csv, valued at the league minimum for 1 year; "
-                   "two-way players' contracts are not valued.")
+                   "two-way players' contracts are not valued. "
+                   f"\"Free agent after {SEASON}\" = no control years left, so no surplus is shown (not counted as zero).")
         ungraded = team_table["RiskAdjWAR"].isna().sum()
         if ungraded:
             st.caption(f"{ungraded} pitcher(s) threw under {MIN_PITCHES_TO_DISPLAY} pitches and show n/a.")

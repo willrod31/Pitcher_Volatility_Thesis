@@ -1,4 +1,10 @@
-SEASON = 2025
+import os
+
+# The season every module grades. 2025 is the default; set THESIS_SEASON=2023 (or
+# python -m analysis.run_all --season 2023) to grade another season without editing this file.
+# Non-default seasons write to data/results/season_<YYYY>/ and never touch dashboard/data/.
+DEFAULT_SEASON = 2025
+SEASON = int(os.environ.get("THESIS_SEASON", DEFAULT_SEASON))
 START_DATE = f"{SEASON}-04-01"
 END_DATE = f"{SEASON}-09-30"
 MIN_PITCHES_FOR_INCLUSION = 500
@@ -10,10 +16,21 @@ COMMAND_METRIC = "location_plus"
 DOLLARS_PER_WAR = 9_500_000
 
 # Module 3: risk-adjusted value
+# "calibrated" = projected next-season FIP-WAR from analysis/war_calibration.py (rate x playing time,
+# fitted on 2023->2024, tested on 2024->2025); "legacy" = the old placeholder
+# LEAGUE_AVG_STARTER_WAR + WAR_PER_TALENT_Z x [z(Stuff+) + z(Location+)], kept for comparison.
+WAR_MODEL = "calibrated"
 REPLACEMENT_LEVEL_WAR = 0.0    # WAR a freely-available replacement pitcher provides
 LEAGUE_AVG_STARTER_WAR = 2.0   # rough anchor for a qualified, average starter
 WAR_PER_TALENT_Z = 1.5         # placeholder scaling: WAR swing per SD of talent -- see Module 3 docstring
 VOLATILITY_SHRINKAGE = 0.6     # max fraction of upside pulled back toward replacement at 100th volatility pctile
+# FIP-WAR (analysis/fip_war.py) and the WAR calibration (analysis/war_calibration.py)
+TOTAL_PITCHER_WAR = 430           # FanGraphs: 1,000 WAR per season, 43% to pitchers
+FIPR9_REGRESSION_IP = 40          # FIPR9 regressed toward the league: (IP x FIPR9 + 40 x lgFIPR9) / (IP + 40)
+STARTER_GS_SHARE = 0.5            # role = starter if GS / G >= this
+CALIBRATION_SEASONS = [2023, 2024, 2025]   # feature seasons t pair with t + 1; the last one is projected forward
+MIN_IP_FOR_RATE_MODEL = 10        # rate model rows need this many IP in t + 1
+
 # Injury history (analysis/injury_history.py): IL stints pulled for SEASON - N through SEASON
 INJURY_LOOKBACK_SEASONS = 3
 
@@ -22,9 +39,10 @@ INJURY_SHRINKAGE = 0.4           # max fraction of upside pulled back at the max
 INJURY_DAYS_FOR_MAX_RISK = 180   # IL days over the lookback window that count as maximum risk (~1 season)
 INJURY_ARM_STINTS_FOR_MAX_RISK = 2  # arm IL stints over the lookback window that count as maximum risk
 
-# Contracts / multi-year surplus (ASSUMPTIONS -- used by risk_adjusted_value.py)
+# Contracts / multi-year surplus (ASSUMPTIONS -- used by risk_adjusted_value.py).
+# Surplus starts the season after SEASON (the first season a team acquiring the pitcher now gets).
 LEAGUE_MIN_SALARY_BY_YEAR = {2025: 760_000, 2026: 780_000}  # later years = last known value
-LEAGUE_MIN_SALARY = LEAGUE_MIN_SALARY_BY_YEAR[SEASON]
+LEAGUE_MIN_SALARY = LEAGUE_MIN_SALARY_BY_YEAR.get(SEASON, min(LEAGUE_MIN_SALARY_BY_YEAR.values()))
 # Two-way players (MLBAM ids): pitching metrics are graded, but no surplus value is computed,
 # because the salary pays for hitting AND pitching (660271 = Shohei Ohtani)
 TWO_WAY_EXCLUDE_VALUE = [660271]

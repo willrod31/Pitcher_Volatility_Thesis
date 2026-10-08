@@ -37,7 +37,8 @@ METRIC_DIRECTION = {
     "AsymmetricUpsideIndex": True,
     "RiskAdjWAR": True,
     "MultiYearSurplus_M": True,
-    "SurplusCurrentSeason_M": True,
+    "SurplusActual_M": True,       # last season's actual FIP-WAR x $/WAR - salary
+    "ActualWAR": True,             # last season's FIP-WAR
     "EdgePct": True,
     "FirstPitchStrikePct": True,
     "FastballVelo": True,          # avg velocity, fastballs (FF/SI/FC) only

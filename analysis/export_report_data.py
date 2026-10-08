@@ -20,14 +20,24 @@ Column contract:
     CommandProxyLegacy, EdgePct, MeatballPct, BBPct, VolatilityPath,
     VolatilityPercentile, TotalDaysMissed, ArmILStints, InjuryRiskScore,
     RiskAdjWAR, ContractStatus, Salary_M, YearsControl, ControlYearsUsed,
-    ControlSource, SurplusCurrentSeason_M, MultiYearSurplus_M,
+    ControlSource, SurplusActual_M, MultiYearSurplus_M,
     SurplusPerControlYear_M, AsymmetricUpsideIndex, PitchMixInefficient,
     MostUsedPitch, BestPitch,
     Qualified, Pitches, PA, Appearances, StuffPlus_v1, StuffPlus_Scaled_v1,
     StuffPlus_Scaled_Reg, StuffPlus_Reliability, LocationPlus_Reg, LocationPlus_Reliability,
     EdgePct_Reg, MeatballPct_Reg, BBPct_Reg, BBPct_Reliability, CommandProxyLegacy_Reg,
     VolatilityScore, VolatilityScore_Reg, VolatilityReliability, VolatilityPercentile_Reg,
-    AsymmetricUpsideIndex_Reg, SalarySource, ContractEstimated, ContractValued, ValueNote
+    AsymmetricUpsideIndex_Reg, SalarySource, ContractEstimated, ContractValued, ValueNote,
+    ProjectedRole, ProjectedIP, ProjectedFIPR9, LegacyProjectedWAR, ActualWAR, ActualIP,
+    RemainingControl, FreeAgentAfterSeason, WARModel
+
+RiskAdjWAR = projected WAR for the season after config.SEASON (config.WAR_MODEL,
+see risk_adjusted_value.py); ProjectedRole/IP/FIPR9 are its parts. ActualWAR /
+ActualIP = config.SEASON's FIP-WAR (risk_adjusted_value's ActualWAR<SEASON>) and
+SurplusActual_M = ActualWAR x $/WAR - salary, a look-back. Names carry no year so
+the dashboard stays season-agnostic (it labels them from config.SEASON).
+MultiYearSurplus_M starts the season after config.SEASON; blank with
+FreeAgentAfterSeason = True when no control is left.
 
 ContractEstimated = on the default contract (not in salaries.csv, not
 pre-arb: league minimum, 1 year, FA); the dashboard tags it "est. contract".
@@ -50,12 +60,13 @@ from pathlib import Path
 
 import pandas as pd
 
-from config import DROP_ALL_NA_PITCHERS, MIN_PITCHES_DASHBOARD
+from config import DROP_ALL_NA_PITCHERS, MIN_PITCHES_DASHBOARD, SEASON
 from analysis import location_plus_proxy, stuff_plus_proxy
 from analysis.contract_status import load_team_paid
 from analysis.data_acquisition import pitchers_only
 from analysis.injury_history import STINTS_PATH
-from analysis.risk_adjusted_value import OUT_PATH as RISK_ADJUSTED_PATH, SURPLUS_BY_YEAR_PATH
+from analysis.risk_adjusted_value import ACTUAL_WAR_COL, OUT_PATH as RISK_ADJUSTED_PATH, SURPLUS_ACTUAL_COL, SURPLUS_BY_YEAR_PATH
+from analysis.utils import WRITES_DASHBOARD
 
 DASHBOARD_DATA = Path(__file__).resolve().parent.parent / "dashboard" / "data"
 OUT_PATH = DASHBOARD_DATA / "pitcher_report_data.csv"
@@ -81,7 +92,7 @@ COLUMN_CONTRACT = [
     "CommandProxyLegacy", "EdgePct", "MeatballPct", "BBPct", "VolatilityPath",
     "VolatilityPercentile", "TotalDaysMissed", "ArmILStints", "InjuryRiskScore",
     "RiskAdjWAR", "ContractStatus", "Salary_M", "YearsControl", "ControlYearsUsed",
-    "ControlSource", "SurplusCurrentSeason_M", "MultiYearSurplus_M",
+    "ControlSource", "SurplusActual_M", "MultiYearSurplus_M",
     "SurplusPerControlYear_M", "AsymmetricUpsideIndex", "PitchMixInefficient",
     "MostUsedPitch", "BestPitch",
     "Qualified", "Pitches", "PA", "Appearances", "StuffPlus_v1", "StuffPlus_Scaled_v1",
@@ -89,6 +100,8 @@ COLUMN_CONTRACT = [
     "EdgePct_Reg", "MeatballPct_Reg", "BBPct_Reg", "BBPct_Reliability", "CommandProxyLegacy_Reg",
     "VolatilityScore", "VolatilityScore_Reg", "VolatilityReliability", "VolatilityPercentile_Reg",
     "AsymmetricUpsideIndex_Reg", "SalarySource", "ContractEstimated", "ContractValued", "ValueNote",
+    "ProjectedRole", "ProjectedIP", "ProjectedFIPR9", "LegacyProjectedWAR", "ActualWAR", "ActualIP",
+    "RemainingControl", "FreeAgentAfterSeason", "WARModel",
 ]
 
 
@@ -97,6 +110,8 @@ def millions(series: pd.Series) -> pd.Series:
 
 
 def run():
+    if not WRITES_DASHBOARD:
+        raise SystemExit(f"dashboard/data/ holds config.DEFAULT_SEASON only; unset THESIS_SEASON to export.")
     if not RISK_ADJUSTED_PATH.exists():
         raise FileNotFoundError(f"{RISK_ADJUSTED_PATH} not found -- run `python -m analysis.risk_adjusted_value` first.")
 
@@ -124,7 +139,7 @@ def run():
         "YearsControl": df["YearsControl"],
         "ControlYearsUsed": df["ControlYearsUsed"],
         "ControlSource": df["ControlSource"],
-        "SurplusCurrentSeason_M": millions(df["SurplusCurrentSeason"]),
+        "SurplusActual_M": millions(df[SURPLUS_ACTUAL_COL]),
         "MultiYearSurplus_M": millions(df["MultiYearSurplus"]),
         "SurplusPerControlYear_M": millions(df["SurplusPerControlYear"]),
         "AsymmetricUpsideIndex": df["AsymmetricUpsideIndex"].round(2),
@@ -155,6 +170,15 @@ def run():
         "ContractEstimated": df["ContractEstimated"],
         "ContractValued": df["ContractValued"],
         "ValueNote": df["ValueNote"],
+        "ProjectedRole": df["ProjectedRole"],
+        "ProjectedIP": df["ProjectedIP"].round(1),
+        "ProjectedFIPR9": df["ProjectedFIPR9"].round(2),
+        "LegacyProjectedWAR": df["LegacyProjectedWAR"].round(2),
+        "ActualWAR": df[ACTUAL_WAR_COL].round(2),
+        "ActualIP": df[f"ActualIP{SEASON}"].round(1),
+        "RemainingControl": df["RemainingControl"],
+        "FreeAgentAfterSeason": df["FreeAgentAfterSeason"],
+        "WARModel": df["WARModel"],
     })[COLUMN_CONTRACT]
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)

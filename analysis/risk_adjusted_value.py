@@ -1,40 +1,58 @@
 """
 Risk-Adjusted Value Projection.
 
-Combines asymmetric_upside.py and volatility_discount.py (plus IL history from
-injury_history.py) into a projected WAR proxy, shrunk toward replacement
-level as volatility and injury risk increase. Ranks pitchers by multi-year
-surplus value over their remaining years of team control.
+Projects each pitcher's WAR for the season after config.SEASON (2026 for the
+2025 data) and ranks pitchers by multi-year surplus value over their remaining
+years of team control, starting that season -- the first one a team acquiring
+the pitcher now would get.
 
-simple_projected_war is an UNCALIBRATED PLACEHOLDER: it converts overall
-talent (Stuff+ and command -- Location+ by default, see config.COMMAND_METRIC --
-z-scored against the league and summed)
-into WAR using a fixed WAR-per-standard-deviation constant
-(config.WAR_PER_TALENT_Z), not a regression against actual historical WAR.
-Treat it as a rank-ordering device, not a real WAR projection, until it's
-regressed against a real training sample -- see README "Known limitations".
+WAR (config.WAR_MODEL):
+- "calibrated" (default): projected next-season FIP-WAR from
+  analysis/war_calibration.py -- a rate model (FIPR9) times a playing-time
+  model (IP), fitted on real 2023->2024 results, tested on 2024->2025, refit
+  on both. The playing-time model already uses VolatilityScore_Reg and
+  InjuryRiskScore (and the rate model may too), so the hand-set
+  VOLATILITY_SHRINKAGE / INJURY_SHRINKAGE are NOT applied on top (that would
+  count the risk twice): both are set to 0 and a note says which model
+  carries the risk.
+- "legacy": the old UNCALIBRATED placeholder, LEAGUE_AVG_STARTER_WAR +
+  WAR_PER_TALENT_Z x [z(Stuff+) + z(command)], shrunk toward replacement
+  level by volatility and injury risk. Always kept as LegacyProjectedWAR
+  (= simple_projected_war) for comparison.
+
+ActualWAR<SEASON> is the pitcher's real FIP-WAR that season (analysis/fip_war.py),
+and SurplusActual<SEASON> = ActualWAR x $/WAR - that season's salary, a look-back
+number only.
 
 Contracts come from the hand-collected data/salaries.csv (joined on
 PitcherId). Blank ContractStatus / YearsControl / PreArbYearsLeft /
 ArbYearsLeft fall back to contract_status.py's debut-date estimate; blank
 Salary for a pre-arb pitcher falls back to the league minimum. Hand-entered
-values always win.
+values always win. YearsControl, PreArbYearsLeft and ArbYearsLeft count
+config.SEASON as year 1.
 
-Multi-year surplus (project_control_years): one row per control year, capped
-at config.MAX_CONTROL_YEARS, with ProjectedWAR held FLAT at this season's
-risk_adjusted_war (no aging curve yet). Salary per year: actual Salary this
-season; GuaranteedFuture when listed; league minimum for pre-arb years;
-max(prior salary, ARB_PCT_OF_MARKET x WAR x $/WAR) for arb years. Surplus =
-WAR x $/WAR - Salary, discounted by (1 + DISCOUNT_RATE) ** years_from_now.
-All of those rates are assumptions in config.py.
+Multi-year surplus (project_control_years) starts the season after SEASON
+(year t = 0, discount factor 1). Remaining control = YearsControl - 1;
+SEASON's stage is used up (PreArbYearsLeft - 1 if any are left, otherwise
+ArbYearsLeft - 1, and the arb year index moves up one). One row per remaining
+control year, capped at config.MAX_CONTROL_YEARS, with ProjectedWAR held
+FLAT (no aging curve). Salary per year: GuaranteedFuture when listed; league
+minimum for pre-arb years; max(prior salary, ARB_PCT_OF_MARKET x WAR x $/WAR)
+for arb years (prior salary starts at SEASON's salary); AAV / prior salary
+otherwise. $/WAR = DOLLARS_PER_WAR x (1 + DOLLARS_PER_WAR_GROWTH) ** (t + 1).
+Surplus = WAR x $/WAR - Salary, discounted by (1 + DISCOUNT_RATE) ** t.
+Pitchers with no control left (free agents after SEASON) get a blank
+MultiYearSurplus and a ValueNote saying so -- not a zero. All of those rates
+are assumptions in config.py.
 
-Small samples: asymmetric_upside.py / volatility_discount.py now include
+Small samples: asymmetric_upside.py / volatility_discount.py include
 pitchers under config.MIN_PITCHES_FOR_INCLUSION (Qualified = False). With
-config.USE_REGRESSED the WAR proxy and shrinkage use the regressed
+config.USE_REGRESSED the legacy WAR proxy and shrinkage use the regressed
 (*_Reg) Stuff+, command and volatility percentile; z-scores always use the
 qualified pool's mean/SD. Raw columns stay in the output.
 """
 import argparse
+import json
 
 import numpy as np
 import pandas as pd
@@ -56,6 +74,7 @@ from config import (
     TWO_WAY_EXCLUDE_VALUE,
     USE_REGRESSED,
     VOLATILITY_SHRINKAGE,
+    WAR_MODEL,
     WAR_PER_TALENT_Z,
 )
 from analysis.asymmetric_upside import COMMAND_COLUMN, COMMAND_COLUMN_USED, OUT_PATH as UPSIDE_PATH, STUFF_COLUMN_USED
@@ -63,9 +82,20 @@ from analysis.data_acquisition import filter_to_team, team_roster_ids
 from analysis.contract_status import estimate_contract_status, load_salaries, save_estimates, status_group
 from analysis.injury_history import SUMMARY_PATH as INJURY_SUMMARY_PATH
 from analysis.volatility_discount import OUT_PATH as VOLATILITY_PATH
-from analysis.utils import RESULTS_DIR, zscore_vs
+from analysis.utils import RESULTS_DIR, WAR_CALIBRATION_DIR, zscore_vs
+
+if WAR_MODEL not in ("calibrated", "legacy"):
+    raise ValueError(f'config.WAR_MODEL must be "calibrated" or "legacy", not {WAR_MODEL!r}')
 
 OUT_PATH = RESULTS_DIR / "risk_adjusted_value.parquet"
+FIRST_VALUE_SEASON = SEASON + 1   # surplus starts here: the first season an acquiring team gets
+# written by analysis/war_calibration.py (not imported from it: it imports this module)
+PROJECTIONS_PATH = WAR_CALIBRATION_DIR / f"projections_{FIRST_VALUE_SEASON}.csv"
+CHOSEN_MODEL_PATH = WAR_CALIBRATION_DIR / "chosen_model.json"
+ACTUAL_WAR_PATH = WAR_CALIBRATION_DIR / f"fip_war_{SEASON}.csv"
+ACTUAL_WAR_COL = f"ActualWAR{SEASON}"
+SURPLUS_ACTUAL_COL = f"SurplusActual{SEASON}"
+FREE_AGENT_NOTE = f"Free agent after {SEASON}: no control value"
 SURPLUS_BY_YEAR_PATH = RESULTS_DIR / "surplus_by_year.csv"
 
 CONTRACT_FIELDS = ["ContractStatus", "YearsControl", "PreArbYearsLeft", "ArbYearsLeft"]
@@ -112,27 +142,76 @@ def injury_risk_score(merged: pd.DataFrame) -> pd.Series:
     return 0.5 * days + 0.5 * arm
 
 
-def apply_risk_shrinkage(merged: pd.DataFrame) -> pd.DataFrame:
-    """Pull projected WAR back toward replacement level as volatility and injury risk rise.
+def risk_shrinkage_used() -> tuple[float, float, str]:
+    """(volatility shrinkage, injury shrinkage, note) for config.WAR_MODEL.
 
-    Volatility: 0th percentile keeps full upside, 100th loses
-    VOLATILITY_SHRINKAGE of it. Injury: a risk score of 1 loses
-    INJURY_SHRINKAGE of it. The two combine multiplicatively so the total
-    never pulls a pitcher past replacement level. Pitchers with no volatility
-    path default to the 50th percentile; pitchers with no injury history
-    pulled get 0 injury risk (InjuryDataPulled = False).
+    Calibrated: 0 and 0 when the chosen rate model or the playing-time model
+    already uses volatility / injury risk (otherwise the risk is counted twice).
+    """
+    if WAR_MODEL == "legacy":
+        return VOLATILITY_SHRINKAGE, INJURY_SHRINKAGE, (
+            f"WAR model: legacy placeholder, hand-set shrinkage (volatility {VOLATILITY_SHRINKAGE}, injury {INJURY_SHRINKAGE})")
+    meta = json.loads(CHOSEN_MODEL_PATH.read_text())
+    carriers = [name for name, used in [(f"rate model {meta['chosen_rate_model']}", meta["risk_in_rate_model"]),
+                                        ("playing-time model", meta["risk_in_playing_time_model"])] if used]
+    if carriers:
+        return 0.0, 0.0, (f"WAR model: calibrated (rate {meta['chosen_rate_model']} x playing time). Volatility and injury "
+                          f"risk are carried by the {' and the '.join(carriers)}, so VOLATILITY_SHRINKAGE and "
+                          f"INJURY_SHRINKAGE are set to 0 (not applied twice).")
+    return VOLATILITY_SHRINKAGE, INJURY_SHRINKAGE, (
+        "WAR model: calibrated, which uses no risk features -- hand-set shrinkage applied on top")
+
+
+def load_projections() -> pd.DataFrame:
+    if not PROJECTIONS_PATH.exists():
+        raise FileNotFoundError(f"{PROJECTIONS_PATH} not found -- run python -m analysis.war_calibration first "
+                                f"(or set config.WAR_MODEL = \"legacy\")")
+    proj = pd.read_csv(PROJECTIONS_PATH)
+    return proj[["PitcherId", "Role", "ProjectedFIPR9", "ProjectedIP", "ProjectedWAR"]].rename(columns={"Role": "ProjectedRole"})
+
+
+def apply_risk_shrinkage(merged: pd.DataFrame) -> pd.DataFrame:
+    """risk_adjusted_war: the projected WAR for config.WAR_MODEL, pulled toward replacement by any shrinkage used.
+
+    Volatility: 0th percentile keeps full upside, 100th loses the volatility
+    shrinkage. Injury: a risk score of 1 loses the injury shrinkage. The two
+    combine multiplicatively so the total never pulls a pitcher past
+    replacement level. Pitchers with no volatility path default to the 50th
+    percentile; pitchers with no injury history pulled get 0 injury risk
+    (InjuryDataPulled = False). In calibrated mode both shrinkages are 0
+    (see risk_shrinkage_used), so risk_adjusted_war = ProjectedWAR.
     """
     merged = merged.copy()
     merged["VolatilityPercentileUsed"] = merged[VOLATILITY_PERCENTILE_USED].fillna(50)
     merged["InjuryDataPulled"] = merged["TotalDaysMissed"].notna()
     merged["InjuryRiskScore"] = injury_risk_score(merged).fillna(0)
 
+    volatility_shrinkage, injury_shrinkage, note = risk_shrinkage_used()
+    print(note)
+    merged["LegacyProjectedWAR"] = merged["simple_projected_war"]
+    if WAR_MODEL == "calibrated":
+        merged = merged.merge(load_projections(), on="PitcherId", how="left")
+        base_war = merged["ProjectedWAR"]
+    else:
+        merged[["ProjectedRole", "ProjectedFIPR9", "ProjectedIP"]] = np.nan
+        base_war = merged["simple_projected_war"]
     keep = (
-        (1 - VOLATILITY_SHRINKAGE * merged["VolatilityPercentileUsed"] / 100)
-        * (1 - INJURY_SHRINKAGE * merged["InjuryRiskScore"])
+        (1 - volatility_shrinkage * merged["VolatilityPercentileUsed"] / 100)
+        * (1 - injury_shrinkage * merged["InjuryRiskScore"])
     )
-    upside_over_replacement = merged["simple_projected_war"] - REPLACEMENT_LEVEL_WAR
-    merged["risk_adjusted_war"] = REPLACEMENT_LEVEL_WAR + upside_over_replacement * keep
+    merged["risk_adjusted_war"] = REPLACEMENT_LEVEL_WAR + (base_war - REPLACEMENT_LEVEL_WAR) * keep
+    merged["WARModel"] = WAR_MODEL
+    return merged
+
+
+def add_actual_war(merged: pd.DataFrame) -> pd.DataFrame:
+    """ActualWAR<SEASON> (FIP-WAR, analysis/fip_war.py); blank if the pitcher has no MLB Stats API line."""
+    if not ACTUAL_WAR_PATH.exists():
+        raise FileNotFoundError(f"{ACTUAL_WAR_PATH} not found -- run python -m analysis.fip_war first")
+    actual = pd.read_csv(ACTUAL_WAR_PATH).set_index("PitcherId")
+    merged = merged.copy()
+    merged[ACTUAL_WAR_COL] = merged["PitcherId"].map(actual["WAR"])
+    merged[f"ActualIP{SEASON}"] = merged["PitcherId"].map(actual["IP"])
     return merged
 
 
@@ -225,22 +304,39 @@ def parse_guaranteed(value) -> dict[int, float]:
     return out
 
 
-def project_control_years(row) -> pd.DataFrame:
-    """One row per remaining control year (this season = year 0), capped at MAX_CONTROL_YEARS."""
-    years = min(int(row["YearsControl"]), MAX_CONTROL_YEARS)
+def remaining_control(row) -> tuple[int, int, int, int]:
+    """(years, pre-arb years, arb years, index of the first remaining arb year) from FIRST_VALUE_SEASON on.
+
+    YearsControl / PreArbYearsLeft / ArbYearsLeft count SEASON as year 1, so
+    SEASON's stage is used up: one pre-arb year if any were left, otherwise one
+    arb year (and the arb year index moves up one -- arb year 1 in SEASON is arb
+    year 2 next season). Years are capped at MAX_CONTROL_YEARS.
+    """
+    years = max(int(row["YearsControl"]) - 1, 0)
     pre_arb_left = int(row["PreArbYearsLeft"])
     arb_left = int(row["ArbYearsLeft"])
-    # which arb year (0-based into ARB_PCT_OF_MARKET) the first remaining arb season is:
+    # which arb year (0-based into ARB_PCT_OF_MARKET) SEASON's first remaining arb season is:
     # 4 left = Super Two year 1; otherwise assume 3 total arb years
     first_arb_idx = max(3, arb_left) - arb_left
+    if pre_arb_left > 0:
+        pre_arb_left -= 1
+    elif arb_left > 0:
+        arb_left -= 1
+        first_arb_idx += 1
+    return min(years, MAX_CONTROL_YEARS), pre_arb_left, arb_left, first_arb_idx
+
+
+def project_control_years(row) -> pd.DataFrame:
+    """One row per remaining control year, FIRST_VALUE_SEASON = year 0 (discount factor 1)."""
+    years, pre_arb_left, arb_left, first_arb_idx = remaining_control(row)
     guaranteed = parse_guaranteed(row["GuaranteedFuture"])
     war = row["risk_adjusted_war"]
 
     rows = []
-    prior_salary = np.nan
+    prior_salary = row["Salary"]   # SEASON's salary: the floor for the first arb raise
     for t in range(years):
-        season = SEASON + t
-        dollars_per_war = DOLLARS_PER_WAR * (1 + DOLLARS_PER_WAR_GROWTH) ** t
+        season = FIRST_VALUE_SEASON + t
+        dollars_per_war = DOLLARS_PER_WAR * (1 + DOLLARS_PER_WAR_GROWTH) ** (t + 1)
         market_value = war * dollars_per_war
         if t < pre_arb_left:
             stage = "pre-arb"
@@ -249,9 +345,7 @@ def project_control_years(row) -> pd.DataFrame:
         else:
             stage = "contract"
 
-        if t == 0:
-            salary, source = row["Salary"], row["SalarySource"]
-        elif season in guaranteed:
+        if season in guaranteed:
             salary, source = guaranteed[season], "guaranteed"
         elif stage == "pre-arb":
             salary, source = league_min_salary(season), "league min"
@@ -277,13 +371,17 @@ def project_control_years(row) -> pd.DataFrame:
 
 
 def add_multi_year_surplus(merged: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Adds SurplusCurrentSeason / MultiYearSurplus / ControlYearsUsed / SurplusPerControlYear."""
+    """Adds SurplusActual<SEASON> / RemainingControl / MultiYearSurplus / ControlYearsUsed / SurplusPerControlYear."""
     merged = merged.copy()
-    merged["SurplusCurrentSeason"] = merged["risk_adjusted_war"] * DOLLARS_PER_WAR - merged["Salary"]
+    merged[SURPLUS_ACTUAL_COL] = merged[ACTUAL_WAR_COL] * DOLLARS_PER_WAR - merged["Salary"]
+    merged["RemainingControl"] = (merged["YearsControl"] - 1).clip(lower=0)
+    free_agent = merged["ContractValued"] & merged["Salary"].notna() & (merged["RemainingControl"] == 0)
+    merged.loc[free_agent, "ValueNote"] = FREE_AGENT_NOTE
+    merged["FreeAgentAfterSeason"] = free_agent
 
-    has_salary = merged[merged["Salary"].notna()]
-    by_year = pd.concat([project_control_years(r) for _, r in has_salary.iterrows()], ignore_index=True) \
-        if not has_salary.empty else pd.DataFrame()
+    valued = merged[merged["Salary"].notna() & merged["risk_adjusted_war"].notna() & ~free_agent]
+    by_year = pd.concat([project_control_years(r) for _, r in valued.iterrows()], ignore_index=True) \
+        if not valued.empty else pd.DataFrame()
 
     if by_year.empty:
         merged["MultiYearSurplus"] = np.nan
@@ -350,6 +448,7 @@ def grade_league() -> pd.DataFrame:
     # graded against the whole league before any --team filtering
     merged = compute_projected_war(merged)
     merged = apply_risk_shrinkage(merged)
+    merged = add_actual_war(merged)
 
     merged = resolve_contracts(merged, load_salaries(verbose=True))
     merged, by_year = add_multi_year_surplus(merged)
@@ -367,13 +466,15 @@ def show(merged: pd.DataFrame, team: str | None = None):
     scope = filter_to_team(merged, team) if team else merged[merged["MultiYearSurplus"].notna()].head(20)
     cols = [
         "Pitcher", "PitcherTeam", "Qualified", STUFF_COLUMN_USED, COMMAND_COLUMN_USED, "VolatilityPath", VOLATILITY_PERCENTILE_USED,
-        "InjuryRiskScore", "simple_projected_war", "risk_adjusted_war", "ContractStatus", "Salary",
-        "YearsControl", "ControlYearsUsed", "SurplusCurrentSeason", "MultiYearSurplus", "SurplusPerControlYear",
+        "InjuryRiskScore", "LegacyProjectedWAR", "ProjectedRole", "ProjectedIP", "risk_adjusted_war", ACTUAL_WAR_COL,
+        "ContractStatus", "Salary", "YearsControl", "RemainingControl", "ControlYearsUsed", SURPLUS_ACTUAL_COL,
+        "MultiYearSurplus", "SurplusPerControlYear",
     ]
     shown = scope[cols].copy()
-    money = ["Salary", "SurplusCurrentSeason", "MultiYearSurplus", "SurplusPerControlYear"]
+    money = ["Salary", SURPLUS_ACTUAL_COL, "MultiYearSurplus", "SurplusPerControlYear"]
     shown[money] = shown[money] / 1_000_000
-    print(f"\n── {'Ranking: ' + team if team else 'Top 20'} by MultiYearSurplus ($M, graded vs. league) ──")
+    print(f"\n── {'Ranking: ' + team if team else 'Top 20'} by MultiYearSurplus from {FIRST_VALUE_SEASON} "
+          f"($M, graded vs. league; risk_adjusted_war = projected {FIRST_VALUE_SEASON} WAR, {WAR_MODEL}) ──")
     print(shown.round(2).to_string(index=False))
 
     report_flags(scope if team else merged[merged["InSalariesCsv"]])

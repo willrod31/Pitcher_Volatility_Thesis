@@ -4,11 +4,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from config import DEFAULT_SEASON, SEASON
+
 # data/ layout (see data/README.md):
 #   data/                       files you edit or read: salaries.csv, missing_contract_report.csv
 #   data/raw/statcast/          cached Statcast pulls (league months, teams, single pitchers)
 #   data/raw/mlb_api/           cached MLB Stats API responses (debut dates, transactions, game logs)
-#   data/results/               each analysis module's output tables
+#   data/results/               each analysis module's output tables for config.DEFAULT_SEASON (2025)
+#   data/results/season_<YYYY>/ the same tables for any other season (THESIS_SEASON=<YYYY>)
+#   data/results/war_calibration/  FIP-WAR and the WAR calibration (all seasons)
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data"
 STATCAST_LEAGUE_DIR = CACHE_DIR / "raw" / "statcast" / "league"
 STATCAST_TEAM_DIR = CACHE_DIR / "raw" / "statcast" / "teams"
@@ -16,11 +20,23 @@ STATCAST_PITCHER_DIR = CACHE_DIR / "raw" / "statcast" / "pitchers"
 MLB_API_DIR = CACHE_DIR / "raw" / "mlb_api"
 TRANSACTIONS_DIR = MLB_API_DIR / "transactions"
 GAMELOG_DIR = MLB_API_DIR / "gamelogs"
-RESULTS_DIR = CACHE_DIR / "results"
+BASE_RESULTS_DIR = CACHE_DIR / "results"
+
+
+def season_results_dir(season: int) -> Path:
+    """Where a season's module outputs live: data/results/ for DEFAULT_SEASON, else data/results/season_<YYYY>/."""
+    return BASE_RESULTS_DIR if season == DEFAULT_SEASON else BASE_RESULTS_DIR / f"season_{season}"
+
+
+RESULTS_DIR = season_results_dir(SEASON)
+WAR_CALIBRATION_DIR = BASE_RESULTS_DIR / "war_calibration"
+SEASON_STATS_DIR = MLB_API_DIR / "season_stats"
+# dashboard/data/ holds DEFAULT_SEASON only; other seasons never write to it
+WRITES_DASHBOARD = SEASON == DEFAULT_SEASON
 STUFF_PLUS_DIR = RESULTS_DIR / "stuff_plus"
 LOCATION_PLUS_DIR = RESULTS_DIR / "location_plus"
 for _d in (STATCAST_LEAGUE_DIR, STATCAST_TEAM_DIR, STATCAST_PITCHER_DIR, TRANSACTIONS_DIR, GAMELOG_DIR,
-           STUFF_PLUS_DIR, LOCATION_PLUS_DIR):
+           STUFF_PLUS_DIR, LOCATION_PLUS_DIR, WAR_CALIBRATION_DIR, SEASON_STATS_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
